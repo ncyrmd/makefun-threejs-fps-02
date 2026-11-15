@@ -1,8 +1,23 @@
-// textures.js — procedural canvas textures for BLACKTIDE's night harbor.
+// textures.js — procedural canvas textures for RIPTIDE's night harbor.
 // Every texture is drawn at load time; no image files ship with the game.
 // The palette is night: wet asphalt, rusted corrugated steel, painted
 // containers in dock colours, hazard striping, and glowing site decals.
+//
+// All randomness here is seeded (mulberry32), so a texture looks the
+// same on every load — the same wall, the same rust, the same speckle.
 import * as THREE from 'three';
+
+// Deterministic RNG: the same seed always draws the same texture.
+function rng(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
 
 function canvas(w, h) {
   const c = document.createElement('canvas');
@@ -19,13 +34,13 @@ function toTexture(c, repeat = 1) {
   return t;
 }
 
-// Deterministic speckle so a texture looks the same on every load.
-function speckle(ctx, w, h, n, colors, sizeMax) {
+// Seeded speckle: faint flecks of colour over a surface.
+function speckle(ctx, w, h, n, colors, sizeMax, rand) {
   for (let i = 0; i < n; i++) {
-    const x = Math.random() * w, y = Math.random() * h;
-    const s = 1 + Math.random() * sizeMax;
-    ctx.fillStyle = colors[Math.floor(Math.random() * colors.length)];
-    ctx.globalAlpha = 0.08 + Math.random() * 0.22;
+    const x = rand() * w, y = rand() * h;
+    const s = 1 + rand() * sizeMax;
+    ctx.fillStyle = colors[Math.floor(rand() * colors.length)];
+    ctx.globalAlpha = 0.08 + rand() * 0.22;
     ctx.fillRect(x, y, s, s);
   }
   ctx.globalAlpha = 1;
@@ -34,12 +49,13 @@ function speckle(ctx, w, h, n, colors, sizeMax) {
 // Wet asphalt yard: dark blue-grey with oil stains, cracks and painted
 // lane markings worn down by container traffic.
 export function groundTexture() {
+  const rand = rng(101);
   const [c, ctx] = canvas(512, 512);
   ctx.fillStyle = '#2e323d'; ctx.fillRect(0, 0, 512, 512);
-  speckle(ctx, 512, 512, 2600, ['#3a3f4c', '#23262f', '#484e5c', '#1c1f27'], 3);
+  speckle(ctx, 512, 512, 2600, ['#3a3f4c', '#23262f', '#484e5c', '#1c1f27'], 3, rand);
   // Oil stains.
   for (let i = 0; i < 14; i++) {
-    const x = Math.random() * 512, y = Math.random() * 512, r = 12 + Math.random() * 42;
+    const x = rand() * 512, y = rand() * 512, r = 12 + rand() * 42;
     const g = ctx.createRadialGradient(x, y, 2, x, y, r);
     g.addColorStop(0, 'rgba(8,10,14,0.55)'); g.addColorStop(1, 'rgba(8,10,14,0)');
     ctx.fillStyle = g;
@@ -48,9 +64,12 @@ export function groundTexture() {
   // Cracks.
   ctx.strokeStyle = 'rgba(10,11,14,0.7)'; ctx.lineWidth = 1.5;
   for (let i = 0; i < 22; i++) {
-    let x = Math.random() * 512, y = Math.random() * 512;
+    let x = rand() * 512, y = rand() * 512;
     ctx.beginPath(); ctx.moveTo(x, y);
-    for (let j = 0; j < 5; j++) { x += (Math.random() - 0.5) * 44; y += (Math.random() - 0.5) * 44; ctx.lineTo(x, y); }
+    for (let j = 0; j < 5; j++) {
+      x += (rand() - 0.5) * 44; y += (rand() - 0.5) * 44;
+      ctx.lineTo(x, y);
+    }
     ctx.stroke();
   }
   // Faded yellow lane lines.
@@ -62,6 +81,7 @@ export function groundTexture() {
 
 // Corrugated warehouse steel: vertical ribs, rust streaks, rivets.
 export function wallTexture() {
+  const rand = rng(202);
   const [c, ctx] = canvas(256, 256);
   ctx.fillStyle = '#55555e'; ctx.fillRect(0, 0, 256, 256);
   for (let x = 0; x < 256; x += 16) {
@@ -71,15 +91,17 @@ export function wallTexture() {
   }
   // Rust streaks running down from the top edge.
   for (let i = 0; i < 26; i++) {
-    const x = Math.random() * 256, len = 20 + Math.random() * 90;
+    const x = rand() * 256, len = 20 + rand() * 90;
     const g = ctx.createLinearGradient(x, 0, x, len);
     g.addColorStop(0, 'rgba(122,72,32,0.5)'); g.addColorStop(1, 'rgba(122,72,32,0)');
-    ctx.fillStyle = g; ctx.fillRect(x, 0, 3 + Math.random() * 4, len);
+    ctx.fillStyle = g; ctx.fillRect(x, 0, 3 + rand() * 4, len);
   }
   // Rivets along the ribs.
   ctx.fillStyle = 'rgba(20,20,24,0.8)';
-  for (let x = 8; x < 256; x += 16) for (let y = 12; y < 256; y += 42) ctx.fillRect(x - 1, y, 3, 3);
-  speckle(ctx, 256, 256, 500, ['#2c2c32', '#66666e'], 2);
+  for (let x = 8; x < 256; x += 16) {
+    for (let y = 12; y < 256; y += 42) ctx.fillRect(x - 1, y, 3, 3);
+  }
+  speckle(ctx, 256, 256, 500, ['#2c2c32', '#66666e'], 2, rand);
   return toTexture(c, 2);
 }
 
@@ -87,22 +109,25 @@ export function wallTexture() {
 // paint colour; each stack gets its own tint so the yard reads in colour
 // even at night.
 export function containerTexture(base) {
+  const rand = rng(303 + base.length * 7 + base.charCodeAt(1));
   const [c, ctx] = canvas(256, 256);
   ctx.fillStyle = base; ctx.fillRect(0, 0, 256, 256);
   for (let x = 0; x < 256; x += 32) {
     const g = ctx.createLinearGradient(x, 0, x + 32, 0);
-    g.addColorStop(0, 'rgba(0,0,0,0.35)'); g.addColorStop(0.5, 'rgba(255,255,255,0.10)'); g.addColorStop(1, 'rgba(0,0,0,0.35)');
+    g.addColorStop(0, 'rgba(0,0,0,0.35)');
+    g.addColorStop(0.5, 'rgba(255,255,255,0.10)');
+    g.addColorStop(1, 'rgba(0,0,0,0.35)');
     ctx.fillStyle = g; ctx.fillRect(x, 0, 32, 256);
   }
   // Wear along the bottom edge and rust at the corners.
   const g = ctx.createLinearGradient(0, 200, 0, 256);
   g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(20,12,6,0.55)');
   ctx.fillStyle = g; ctx.fillRect(0, 200, 256, 56);
-  speckle(ctx, 256, 256, 700, ['rgba(0,0,0,0.4)', 'rgba(255,255,255,0.08)'], 2);
+  speckle(ctx, 256, 256, 700, ['rgba(0,0,0,0.4)', 'rgba(255,255,255,0.08)'], 2, rand);
   // Stencilled container code.
   ctx.fillStyle = 'rgba(235,235,225,0.85)';
   ctx.font = 'bold 26px monospace';
-  ctx.fillText('BTDU 481 902-7', 18, 52);
+  ctx.fillText('RPDU 731 550-2', 18, 52);
   ctx.font = 'bold 15px monospace';
   ctx.fillText('MAX GROSS 30 480 KG', 18, 78);
   return toTexture(c, 1);
@@ -110,6 +135,7 @@ export function containerTexture(base) {
 
 // Wooden crate: planks, nails, stencil.
 export function crateTexture() {
+  const rand = rng(404);
   const [c, ctx] = canvas(256, 256);
   ctx.fillStyle = '#6e5636'; ctx.fillRect(0, 0, 256, 256);
   for (let y = 0; y < 256; y += 42) {
@@ -123,20 +149,21 @@ export function crateTexture() {
   ctx.beginPath(); ctx.moveTo(0, 256); ctx.lineTo(256, 0); ctx.stroke();
   ctx.fillStyle = 'rgba(235,225,200,0.8)';
   ctx.font = 'bold 22px monospace';
-  ctx.fillText('BLACKTIDE', 52, 130);
-  speckle(ctx, 256, 256, 500, ['#4a3a22', '#8a7048'], 2);
+  ctx.fillText('RIPTIDE', 62, 130);
+  speckle(ctx, 256, 256, 500, ['#4a3a22', '#8a7048'], 2, rand);
   return toTexture(c, 1);
 }
 
-// Brushed dark metal for containers' roofs, the crane and the forklifts.
+// Brushed dark metal for container roofs, the crane and the forklifts.
 export function metalTexture() {
+  const rand = rng(505);
   const [c, ctx] = canvas(256, 256);
   ctx.fillStyle = '#3c4148'; ctx.fillRect(0, 0, 256, 256);
   for (let i = 0; i < 256; i++) {
-    ctx.fillStyle = `rgba(255,255,255,${Math.random() * 0.05})`;
+    ctx.fillStyle = `rgba(255,255,255,${rand() * 0.05})`;
     ctx.fillRect(0, i, 256, 1);
   }
-  speckle(ctx, 256, 256, 600, ['#2a2e34', '#565d66'], 2);
+  speckle(ctx, 256, 256, 600, ['#2a2e34', '#565d66'], 2, rand);
   return toTexture(c, 2);
 }
 
@@ -147,7 +174,8 @@ export function hazardTexture() {
   ctx.fillStyle = '#151312';
   for (let i = -128; i < 256; i += 32) {
     ctx.beginPath();
-    ctx.moveTo(i, 128); ctx.lineTo(i + 16, 128); ctx.lineTo(i + 16 + 128, 0); ctx.lineTo(i + 128, 0);
+    ctx.moveTo(i, 128); ctx.lineTo(i + 16, 128);
+    ctx.lineTo(i + 16 + 128, 0); ctx.lineTo(i + 128, 0);
     ctx.closePath(); ctx.fill();
   }
   return toTexture(c, 1);
@@ -217,12 +245,13 @@ export function sparkTexture() {
 
 // Water at the dock's edge: dark, almost black, with a faint moon glitter.
 export function waterTexture() {
+  const rand = rng(606);
   const [c, ctx] = canvas(256, 256);
   ctx.fillStyle = '#060a12'; ctx.fillRect(0, 0, 256, 256);
   for (let i = 0; i < 90; i++) {
-    const y = Math.random() * 256, x = Math.random() * 256, w = 20 + Math.random() * 70;
-    ctx.strokeStyle = `rgba(120,160,210,${0.05 + Math.random() * 0.12})`;
-    ctx.lineWidth = 1 + Math.random();
+    const y = rand() * 256, x = rand() * 256, w = 20 + rand() * 70;
+    ctx.strokeStyle = `rgba(120,160,210,${0.05 + rand() * 0.12})`;
+    ctx.lineWidth = 1 + rand();
     ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + w, y); ctx.stroke();
   }
   return toTexture(c, 6);

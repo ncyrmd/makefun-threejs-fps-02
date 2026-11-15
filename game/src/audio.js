@@ -1,7 +1,8 @@
-// audio.js — synthesized WebAudio sounds for BLACKTIDE. No audio files
-// ship with the game; every shot, beep and sting is built from oscillators
-// and filtered noise at runtime. The harbour adds two of its own: the low
-// crane horn that opens a round, and the whoosh of an incendiary going up.
+// audio.js — synthesized WebAudio sounds for RIPTIDE. No audio files
+// ship with the game; every shot, beep and sting is built from
+// oscillators and filtered noise at runtime. The harbour adds two of its
+// own: the low crane horn that opens a round, and the whoosh of an
+// incendiary going up.
 export class SoundBank {
   constructor() {
     this.ctx = null;
@@ -35,7 +36,9 @@ export class SoundBank {
     return buf;
   }
 
-  _burst(freq, dur, type, vol, slideTo) {
+  // One oscillator blip: a tone that slides from `freq` to `slideTo`
+  // over `dur` seconds at volume `vol`.
+  _tone(freq, dur, type, vol, slideTo) {
     if (!this.ctx || this.muted) return;
     const t = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
@@ -49,7 +52,8 @@ export class SoundBank {
     osc.start(t); osc.stop(t + dur);
   }
 
-  _noise(dur, filterFreq, vol, type = 'lowpass') {
+  // One burst of filtered noise.
+  _hiss(dur, filterFreq, vol, type = 'lowpass') {
     if (!this.ctx || this.muted) return;
     const t = this.ctx.currentTime;
     const src = this.ctx.createBufferSource();
@@ -63,71 +67,70 @@ export class SoundBank {
     src.start(t); src.stop(t + dur);
   }
 
-  // Shot by weapon family. `dist` attenuates distant fire.
+  // A short two-note phrase, the second note delayed by `gap` ms.
+  _phrase(notes, gap = 130) {
+    notes.forEach(([freq, dur, vol], i) => {
+      setTimeout(() => this._tone(freq, dur, 'sine', vol, freq), i * gap);
+    });
+  }
+
+  // Shot by weapon family. `dist` attenuates distant fire. Each family
+  // is a noise burst (the crack) plus a tone (the body of the shot).
   shot(kind, dist = 0) {
     if (!this.ctx || this.muted) return;
     const att = Math.max(0.15, 1 - dist / 60);
-    switch (kind) {
-      case 'pistol':
-        this._noise(0.09, 1800, 0.5 * att);
-        this._burst(220, 0.07, 'square', 0.25 * att, 90);
-        break;
-      case 'smg':
-        this._noise(0.07, 2400, 0.42 * att);
-        this._burst(320, 0.05, 'square', 0.2 * att, 140);
-        break;
-      case 'rifle':
-        this._noise(0.12, 1400, 0.6 * att);
-        this._burst(160, 0.1, 'sawtooth', 0.3 * att, 70);
-        break;
-      case 'lmg':
-        this._noise(0.13, 1100, 0.55 * att);
-        this._burst(130, 0.11, 'sawtooth', 0.28 * att, 60);
-        break;
-      case 'shotgun':
-        this._noise(0.22, 900, 0.8 * att);
-        this._burst(110, 0.16, 'sawtooth', 0.4 * att, 45);
-        break;
-      case 'dmr':
-        this._noise(0.2, 2600, 0.7 * att);
-        this._burst(520, 0.14, 'square', 0.3 * att, 120);
-        break;
-      default:
-        this._noise(0.1, 1500, 0.5 * att);
-    }
+    const SHOTS = {
+      pistol: [0.09, 1800, 0.5, 220, 0.07, 'square', 0.25, 90],
+      smg: [0.07, 2400, 0.42, 320, 0.05, 'square', 0.2, 140],
+      rifle: [0.12, 1400, 0.6, 160, 0.1, 'sawtooth', 0.3, 70],
+      lmg: [0.13, 1100, 0.55, 130, 0.11, 'sawtooth', 0.28, 60],
+      shotgun: [0.22, 900, 0.8, 110, 0.16, 'sawtooth', 0.4, 45],
+      dmr: [0.2, 2600, 0.7, 520, 0.14, 'square', 0.3, 120],
+    };
+    const s = SHOTS[kind] || [0.1, 1500, 0.5, 200, 0.08, 'square', 0.25, 90];
+    this._hiss(s[0], s[1], s[2] * att);
+    this._tone(s[3], s[4], s[5], s[6] * att, s[7]);
   }
 
-  reload() { this._burst(700, 0.06, 'square', 0.15, 500); this._burst(500, 0.06, 'square', 0.15, 900); }
-  dryFire() { this._burst(900, 0.04, 'square', 0.2, 700); }
-  hit(isHead) { this._burst(isHead ? 1400 : 1000, 0.05, 'sine', 0.3, isHead ? 1800 : 700); }
-  kill() { this._burst(660, 0.09, 'sine', 0.35, 990); this._burst(990, 0.12, 'sine', 0.3, 1320); }
-  hurt() { this._burst(180, 0.15, 'sawtooth', 0.25, 90); }
-  buy() { this._burst(880, 0.07, 'sine', 0.25, 880); this._burst(1320, 0.09, 'sine', 0.25, 1320); }
-  click() { this._burst(1200, 0.03, 'square', 0.12, 1200); }
-  denied() { this._burst(220, 0.12, 'square', 0.2, 160); }
-  roundWin() {
-    this._burst(523, 0.14, 'sine', 0.3, 523);
-    setTimeout(() => this._burst(659, 0.14, 'sine', 0.3, 659), 130);
-    setTimeout(() => this._burst(784, 0.22, 'sine', 0.32, 784), 260);
+  reload() {
+    this._tone(700, 0.06, 'square', 0.15, 500);
+    this._tone(500, 0.06, 'square', 0.15, 900);
   }
-  roundLose() {
-    this._burst(392, 0.16, 'sine', 0.3, 392);
-    setTimeout(() => this._burst(311, 0.24, 'sine', 0.3, 311), 160);
+  dryFire() { this._tone(900, 0.04, 'square', 0.2, 700); }
+  hit(isHead) { this._tone(isHead ? 1400 : 1000, 0.05, 'sine', 0.3, isHead ? 1800 : 700); }
+  kill() {
+    this._tone(660, 0.09, 'sine', 0.35, 990);
+    this._tone(990, 0.12, 'sine', 0.3, 1320);
   }
-  plantBeep() { this._burst(1050, 0.08, 'square', 0.25, 1050); }
+  hurt() { this._tone(180, 0.15, 'sawtooth', 0.25, 90); }
+  buy() {
+    this._tone(880, 0.07, 'sine', 0.25, 880);
+    this._tone(1320, 0.09, 'sine', 0.25, 1320);
+  }
+  click() { this._tone(1200, 0.03, 'square', 0.12, 1200); }
+  denied() { this._tone(220, 0.12, 'square', 0.2, 160); }
+  roundWin() { this._phrase([[523, 0.14, 0.3], [659, 0.14, 0.3], [784, 0.22, 0.32]], 130); }
+  roundLose() { this._phrase([[392, 0.16, 0.3], [311, 0.24, 0.3]], 160); }
+  plantBeep() { this._tone(1050, 0.08, 'square', 0.25, 1050); }
   bombBeep(urgent) {
-    this._burst(urgent ? 1500 : 1150, 0.07, 'square', 0.28, urgent ? 1500 : 1150);
+    this._tone(urgent ? 1500 : 1150, 0.07, 'square', 0.28, urgent ? 1500 : 1150);
   }
   explosion() {
-    this._noise(0.9, 300, 0.9);
-    this._burst(60, 0.8, 'sine', 0.6, 30);
+    this._hiss(0.9, 300, 0.9);
+    this._tone(60, 0.8, 'sine', 0.6, 30);
   }
-  flashPop() { this._noise(0.15, 4000, 0.6, 'highpass'); this._burst(2000, 0.1, 'sine', 0.2, 300); }
-  smokePop() { this._noise(0.4, 700, 0.35); }
-  fireWhoosh() { this._noise(0.7, 500, 0.5); this._burst(90, 0.5, 'sawtooth', 0.25, 50); }
+  flashPop() {
+    this._hiss(0.15, 4000, 0.6, 'highpass');
+    this._tone(2000, 0.1, 'sine', 0.2, 300);
+  }
+  smokePop() { this._hiss(0.4, 700, 0.35); }
+  fireWhoosh() {
+    this._hiss(0.7, 500, 0.5);
+    this._tone(90, 0.5, 'sawtooth', 0.25, 50);
+  }
   // The crane horn that opens the round: two low tones across the water.
   craneHorn() {
-    this._burst(98, 1.1, 'sawtooth', 0.22, 92);
-    this._burst(147, 1.1, 'sawtooth', 0.16, 139);
+    this._tone(98, 1.1, 'sawtooth', 0.22, 92);
+    this._tone(147, 1.1, 'sawtooth', 0.16, 139);
   }
 }

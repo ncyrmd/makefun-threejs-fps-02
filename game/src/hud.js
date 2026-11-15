@@ -1,9 +1,11 @@
-// hud.js — every DOM surface of BLACKTIDE: the HUD, the minimap, the buy
-// menu, the kill feed, banners and the match-end table. It reads state and
-// writes the DOM; it never runs the simulation. All lookups go through $
-// so a missing element fails loudly in development instead of silently.
+// hud.js — every DOM surface of RIPTIDE: the HUD, the minimap, the buy
+// menu, the kill feed, banners and the match-end table. It reads the match
+// data and writes the DOM; it never runs the simulation. All lookups go
+// through $ so a missing element fails loudly in development instead of
+// silently.
 import { WEAPONS, BUY_ITEMS } from './weapons.js';
 import { SITE_A, SITE_B, MAP } from './map.js';
+import { PHASE, MAX_ROUNDS } from './state.js';
 
 export function $(id) {
   const el = document.getElementById(id);
@@ -16,8 +18,8 @@ function escapeHtml(s) {
 }
 
 // --- buy menu ---
-export function renderBuy(state, onBuyClick) {
-  const p = state.player;
+export function renderBuy(sim, onBuyClick) {
+  const p = sim.player;
   const list = $('buy-list');
   const items = BUY_ITEMS.map((item) => {
     const owned = item.kind === 'weapon' && p.loadout.weapons[item.id];
@@ -37,51 +39,45 @@ export function renderBuy(state, onBuyClick) {
   }
 }
 
-export function applyBuy(state, item) {
-  const p = state.player;
+// Buy one item for the player. Returns true when the purchase went
+// through; false (and no money spent) when it cannot.
+export function applyBuy(sim, item) {
+  const p = sim.player;
   if (!item) return false;
+  if (p.loadout.money < item.price) return false;
   if (item.kind === 'weapon') {
     if (p.loadout.weapons[item.id]) return false;
-    if (p.loadout.money < item.price) return false;
     p.loadout.money -= item.price;
     p.loadout.weapons[item.id] = { mag: WEAPONS[item.id].mag, reserve: WEAPONS[item.id].reserve };
     p.loadout.current = item.id;
     p.sprayN = 0;
     return true;
   }
-  if (item.id === 'armor') {
-    if (p.loadout.armor >= 50 || p.loadout.money < item.price) return false;
-    p.loadout.money -= item.price; p.loadout.armor = 50; return true;
+  switch (item.id) {
+    case 'armor':
+      if (p.loadout.armor >= 50) return false;
+      p.loadout.money -= item.price; p.loadout.armor = 50; return true;
+    case 'helmet':
+      if (p.loadout.helmet) return false;
+      p.loadout.money -= item.price; p.loadout.helmet = true; return true;
+    case 'defuse':
+      if (p.loadout.defuseKit) return false;
+      p.loadout.money -= item.price; p.loadout.defuseKit = true; return true;
+    case 'flash':
+      p.loadout.money -= item.price; p.loadout.flash++; return true;
+    case 'smoke':
+      p.loadout.money -= item.price; p.loadout.smoke++; return true;
+    case 'fire':
+      p.loadout.money -= item.price; p.loadout.fire++; return true;
+    case 'ammo':
+      p.loadout.money -= item.price;
+      for (const id of Object.keys(p.loadout.weapons)) {
+        p.loadout.weapons[id].reserve = WEAPONS[id].reserve;
+      }
+      return true;
+    default:
+      return false;
   }
-  if (item.id === 'helmet') {
-    if (p.loadout.helmet || p.loadout.money < item.price) return false;
-    p.loadout.money -= item.price; p.loadout.helmet = true; return true;
-  }
-  if (item.id === 'defuse') {
-    if (p.loadout.defuseKit || p.loadout.money < item.price) return false;
-    p.loadout.money -= item.price; p.loadout.defuseKit = true; return true;
-  }
-  if (item.id === 'flash') {
-    if (p.loadout.money < item.price) return false;
-    p.loadout.money -= item.price; p.loadout.flash++; return true;
-  }
-  if (item.id === 'smoke') {
-    if (p.loadout.money < item.price) return false;
-    p.loadout.money -= item.price; p.loadout.smoke++; return true;
-  }
-  if (item.id === 'fire') {
-    if (p.loadout.money < item.price) return false;
-    p.loadout.money -= item.price; p.loadout.fire++; return true;
-  }
-  if (item.id === 'ammo') {
-    if (p.loadout.money < item.price) return false;
-    p.loadout.money -= item.price;
-    for (const id of Object.keys(p.loadout.weapons)) {
-      p.loadout.weapons[id].reserve = WEAPONS[id].reserve;
-    }
-    return true;
-  }
-  return false;
 }
 
 // --- banners / hints ---
@@ -96,26 +92,22 @@ export function showBanner(title, sub, kind) {
 export function clearBanner() {
   $('banner').className = '';
 }
-export function showHint(text) {
-  const h = $('hint');
-  h.textContent = text;
-  h.className = 'show';
-  clearTimeout(h._t);
-  h._t = setTimeout(() => { h.className = ''; }, 4000);
+function showTimed(id, text, ms) {
+  const el = $(id);
+  el.textContent = text;
+  el.className = 'show';
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.className = ''; }, ms);
 }
-export function showCallout(text) {
-  const c = $('callout');
-  c.textContent = text;
-  c.className = 'show';
-  clearTimeout(c._t);
-  c._t = setTimeout(() => { c.className = ''; }, 3500);
-}
+export function showHint(text) { showTimed('hint', text, 4000); }
+export function showCallout(text) { showTimed('callout', text, 3500); }
 
 // --- kill feed / hitmarkers / damage ---
-export function addFeed(state, attacker, victim, weaponName, isHead) {
+export function addFeed(sim, attacker, victim, weaponName, isHead) {
   const feed = $('feed');
-  const a = attacker ? `<span class="${attacker.team === 'salvage' ? 'teal' : 'orange'}">${escapeHtml(attacker.name)}</span>` : '';
-  const v = `<span class="${victim.team === 'salvage' ? 'teal' : 'orange'}">${escapeHtml(victim.name)}</span>`;
+  const teamClass = (c) => (c.team === 'salvage' ? 'teal' : 'orange');
+  const a = attacker ? `<span class="${teamClass(attacker)}">${escapeHtml(attacker.name)}</span>` : '';
+  const v = `<span class="${teamClass(victim)}">${escapeHtml(victim.name)}</span>`;
   const div = document.createElement('div');
   div.innerHTML = `${a} <span class="feed-weapon">[${escapeHtml(weaponName)}${isHead ? ' ☠' : ''}]</span> ${v}`;
   feed.prepend(div);
@@ -168,9 +160,9 @@ export function setPlantBar(show, label, frac) {
   $('plant-fill').style.width = Math.round(frac * 100) + '%';
 }
 
-// --- HUD refresh (called once a second and after every phase change) ---
-export function updateHud(state) {
-  const p = state.player;
+// --- HUD refresh (called at 10 Hz and after every phase change) ---
+export function updateHud(sim) {
+  const p = sim.player;
   if (!p) return;
   $('health').textContent = Math.max(0, Math.ceil(p.hp));
   $('health').className = p.hp <= 30 ? 'low' : '';
@@ -189,33 +181,34 @@ export function updateHud(state) {
   $('util-smoke').textContent = 'SMOKE ×' + p.loadout.smoke;
   $('util-fire').textContent = 'FIRE ×' + p.loadout.fire;
   // Score, timer, round, halftime.
-  $('score-salvage').textContent = state.score.salvage;
-  $('score-harbour').textContent = state.score.harbour;
-  $('timer').textContent = state.phase === 'live' || state.phase === 'buy'
-    ? String(Math.max(0, Math.ceil(state.phaseT)))
+  $('score-salvage').textContent = sim.score.salvage;
+  $('score-harbour').textContent = sim.score.harbour;
+  $('timer').textContent = sim.phase === PHASE.LIVE || sim.phase === PHASE.BUY
+    ? String(Math.max(0, Math.ceil(sim.phaseT)))
     : '—';
-  $('round-label').textContent = 'ROUND ' + state.round + ' / ' + 9 + (state.half === 2 ? ' · 2ND HALF' : ' · 1ST HALF');
+  $('round-label').textContent = 'ROUND ' + sim.round + ' / ' + MAX_ROUNDS
+    + (sim.half === 2 ? ' · 2ND HALF' : ' · 1ST HALF');
   // Round history dots from the player's side.
-  $('round-history').textContent = state.roundHistory.map((r) => (r === 'W' ? '●' : '○')).join(' ');
+  $('round-history').textContent = sim.roundHistory.map((r) => (r === 'W' ? '●' : '○')).join(' ');
   // Alive counts.
-  const all = [p, ...state.bots];
-  const sAlive = all.filter((c) => c.team === 'salvage' && c.alive).length;
-  const hAlive = all.filter((c) => c.team === 'harbour' && c.alive).length;
-  $('alive-salvage').textContent = sAlive;
-  $('alive-harbour').textContent = hAlive;
+  const all = [p, ...sim.bots];
+  $('alive-salvage').textContent = all.filter((c) => c.team === 'salvage' && c.alive).length;
+  $('alive-harbour').textContent = all.filter((c) => c.team === 'harbour' && c.alive).length;
   // Bomb status line.
-  const bomb = state.bomb;
+  const bomb = sim.bomb;
   let bombText = '';
   if (bomb.state === 'planted') bombText = `CHARGE PLANTED — SITE ${bomb.site} · ${Math.ceil(bomb.timer)}s`;
   else if (bomb.state === 'dropped') bombText = 'CHARGE DROPPED — pick it up';
-  else if (bomb.state === 'carried') bombText = bomb.carrierId === 'player' ? 'YOU CARRY THE CHARGE' : 'TEAMMATE CARRIES THE CHARGE';
+  else if (bomb.state === 'carried') {
+    bombText = bomb.carrierId === 'player' ? 'YOU CARRY THE CHARGE' : 'TEAMMATE CARRIES THE CHARGE';
+  }
   $('bomb-status').textContent = bombText;
-  drawMinimap(state);
+  drawMinimap(sim);
 }
 
 // --- minimap: the harbour from above, with live dots and the bomb ---
 const MM_W = 168, MM_H = 132;
-function drawMinimap(state) {
+function drawMinimap(sim) {
   const cv = $('minimap');
   const ctx = cv.getContext('2d');
   if (cv.width !== MM_W) { cv.width = MM_W; cv.height = MM_H; }
@@ -229,54 +222,55 @@ function drawMinimap(state) {
   ctx.fillStyle = 'rgba(10,30,55,0.9)';
   ctx.fillRect(0, MM_H - 8, MM_W, 8);
   // Sites.
-  for (const [site, color] of [[SITE_A, '#2fd8c8'], [SITE_B, '#ff7a3d']]) {
+  for (const [site, color, label] of [[SITE_A, '#2fd8c8', 'A'], [SITE_B, '#ff7a3d', 'B']]) {
     ctx.strokeStyle = color; ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.arc(sx(site.x), sz(site.z), 7, 0, Math.PI * 2); ctx.stroke();
     ctx.fillStyle = color;
     ctx.font = 'bold 9px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText(site === SITE_A ? 'A' : 'B', sx(site.x), sz(site.z));
+    ctx.fillText(label, sx(site.x), sz(site.z));
   }
   // Bomb.
-  if (state.bomb.state === 'planted' || state.bomb.state === 'dropped') {
+  if (sim.bomb.state === 'planted' || sim.bomb.state === 'dropped') {
     ctx.fillStyle = '#ff2222';
-    ctx.beginPath(); ctx.arc(sx(state.bomb.x), sz(state.bomb.z), 4, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(sx(sim.bomb.x), sz(sim.bomb.z), 4, 0, Math.PI * 2); ctx.fill();
   }
   // Smokes and fires.
-  for (const s of state.smokes) {
+  for (const s of sim.smokes) {
     ctx.fillStyle = 'rgba(200,200,200,0.35)';
     ctx.beginPath(); ctx.arc(sx(s.x), sz(s.z), 6, 0, Math.PI * 2); ctx.fill();
   }
-  for (const f of state.fires) {
+  for (const f of sim.fires) {
     ctx.fillStyle = 'rgba(255,120,20,0.5)';
     ctx.beginPath(); ctx.arc(sx(f.x), sz(f.z), 5, 0, Math.PI * 2); ctx.fill();
   }
   // Combatants: the player is a white triangle, teammates teal, enemies orange.
-  const all = [state.player, ...state.bots];
+  const all = [sim.player, ...sim.bots];
   for (const c of all) {
     if (!c || !c.alive) continue;
     const x = sx(c.x), y = sz(c.z);
-    if (c === state.player) {
+    if (c === sim.player) {
       ctx.fillStyle = '#ffffff';
       ctx.beginPath();
       ctx.moveTo(x, y - 5); ctx.lineTo(x + 4, y + 4); ctx.lineTo(x - 4, y + 4);
       ctx.closePath(); ctx.fill();
     } else {
-      ctx.fillStyle = c.team === state.player.team ? '#2fd8c8' : '#ff7a3d';
+      ctx.fillStyle = c.team === sim.player.team ? '#2fd8c8' : '#ff7a3d';
       ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill();
     }
   }
 }
 
-export function renderMatchEnd(state) {
-  const playerTeam = state.player ? state.player.team : state.attackTeam;
-  $('end-title').textContent = state.winner === playerTeam ? 'SALVAGERS TAKE THE HARBOUR' : 'HARBOUR WATCH HOLDS THE LINE';
-  $('end-sub').textContent = `Final score ${state.score.salvage} — ${state.score.harbour} · ` +
-    `You: ${state.stats.kills} kills, ${state.stats.deaths} deaths, ` +
-    `${Math.round(state.stats.damage)} damage, ` +
-    `${state.stats.shots ? Math.round(100 * state.stats.hits / state.stats.shots) : 0}% accuracy` +
-    (state.stats.wallbangs ? `, ${state.stats.wallbangs} wallbangs` : '');
+export function renderMatchEnd(sim) {
+  const playerTeam = sim.player ? sim.player.team : sim.attackTeam;
+  const won = sim.winner === playerTeam;
+  $('end-title').textContent = won ? 'SALVAGERS TAKE THE HARBOUR' : 'HARBOUR WATCH HOLDS THE LINE';
+  $('end-sub').textContent = `Final score ${sim.score.salvage} — ${sim.score.harbour} · ` +
+    `You: ${sim.stats.kills} kills, ${sim.stats.deaths} deaths, ` +
+    `${Math.round(sim.stats.damage)} damage, ` +
+    `${sim.stats.shots ? Math.round(100 * sim.stats.hits / sim.stats.shots) : 0}% accuracy` +
+    (sim.stats.wallbangs ? `, ${sim.stats.wallbangs} wallbangs` : '');
   const rows = [['Player', 'K', 'D', 'Damage']];
-  const all = [state.player, ...state.bots];
+  const all = [sim.player, ...sim.bots];
   for (const c of all) {
     rows.push([c.name, c.kills, c.deaths, Math.round(c.damageDealt)]);
   }

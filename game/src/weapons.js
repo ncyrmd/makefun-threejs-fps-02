@@ -1,12 +1,14 @@
-// weapons.js — weapon definitions, spray patterns, economy and the buy
-// catalogue for BLACKTIDE. All names, stats and prices are original.
+// weapons.js — weapon definitions, spray, economy and the buy catalogue
+// for RIPTIDE. All names, stats and prices are original.
 //
 // Gunplay model: every automatic weapon carries a deterministic spray
-// pattern — a table of (x, y) recoil offsets, one per shot in the magazine.
-// The first shots climb almost straight up, then the pattern pulls sideways;
-// a player who drags the mouse against the pattern keeps the group tight.
-// Semi-automatic weapons have no pattern: their kick is a single impulse.
-// Spray is what separates a rifle you have learned from one you have not.
+// pattern — a fixed sequence of recoil offsets, one per shot in the
+// magazine, produced by a seeded generator so the pattern is identical
+// on every load. The first shots climb almost straight up, then the
+// pattern pulls sideways; a player who drags the mouse against the
+// pattern keeps the group tight. Semi-automatic weapons have no pattern:
+// their kick is a single impulse. Spray is what separates a rifle you
+// have learned from one you have not.
 export const ECONOMY = {
   startMoney: 800,
   killReward: 300,
@@ -21,12 +23,19 @@ export const ECONOMY = {
 // recoil: pitch kick per shot (radians); auto: hold-to-fire; zoom: ADS fov.
 // pen: wall-penetration power — a bullet keeps going through cover up to
 // this many metres thick, losing half its damage on the way through.
+// pellets: shotgun fires this many pellets per trigger pull.
 export const WEAPONS = {
   pistol: {
     id: 'pistol', slot: 1, name: 'P9 SIDEARM', price: 0, kind: 'pistol',
     damage: 26, headMult: 3.4, rpm: 420, auto: false, mag: 12, reserve: 48,
-    reload: 1.5, spread: 0.011, moveSpread: 0.030, recoil: 0.011, range: 55,
+    reload: 1.5, spread: 0.011, moveSpread: 0.03, recoil: 0.011, range: 55,
     falloff: 0.55, pen: 0.3, tracer: 0xffd24d, sound: 'pistol',
+  },
+  duelist: {
+    id: 'duelist', slot: 1, name: 'DUELIST .44', price: 300, kind: 'pistol',
+    damage: 44, headMult: 3.0, rpm: 150, auto: false, mag: 8, reserve: 24,
+    reload: 1.8, spread: 0.008, moveSpread: 0.028, recoil: 0.02, range: 50,
+    falloff: 0.6, pen: 0.6, tracer: 0xffc46b, sound: 'pistol',
   },
   smg: {
     id: 'smg', slot: 2, name: 'VIPER SMG', price: 1100, kind: 'smg',
@@ -60,59 +69,42 @@ export const WEAPONS = {
   },
 };
 
-// Spray patterns: [x, y] recoil offsets in radians, one entry per shot.
-// The pattern is applied on top of the base spread; the first eight shots
-// of the rifle climb, the next eight drift right, then it settles left.
-// The SMG climbs fast and wanders; the LMG climbs slow and wide.
-export const SPRAY = {
-  rifle: [
-    [0, 0.011], [0, 0.013], [0, 0.014], [0.001, 0.015], [0.002, 0.015],
-    [0.003, 0.014], [0.004, 0.013], [0.005, 0.012], [0.007, 0.011],
-    [0.009, 0.010], [0.011, 0.009], [0.012, 0.008], [0.012, 0.007],
-    [0.010, 0.006], [0.007, 0.006], [0.004, 0.005], [0.001, 0.005],
-    [-0.002, 0.005], [-0.005, 0.004], [-0.007, 0.004], [-0.009, 0.004],
-    [-0.010, 0.003], [-0.010, 0.003], [-0.009, 0.003], [-0.007, 0.003],
-    [-0.004, 0.003], [-0.001, 0.003], [0.002, 0.003], [0.004, 0.003],
-    [0.005, 0.003],
-  ],
-  smg: [
-    [0, 0.009], [0.001, 0.010], [0.002, 0.011], [0.004, 0.011],
-    [0.006, 0.010], [0.008, 0.009], [0.009, 0.008], [0.009, 0.007],
-    [0.008, 0.006], [0.005, 0.006], [0.002, 0.005], [-0.002, 0.005],
-    [-0.005, 0.005], [-0.008, 0.004], [-0.009, 0.004], [-0.009, 0.004],
-    [-0.007, 0.003], [-0.004, 0.003], [0, 0.003], [0.004, 0.003],
-    [0.007, 0.003], [0.009, 0.003], [0.010, 0.002], [0.009, 0.002],
-    [0.007, 0.002], [0.004, 0.002], [0.001, 0.002], [-0.002, 0.002],
-  ],
-  lmg: [
-    [0, 0.008], [0, 0.009], [0.001, 0.010], [0.002, 0.011], [0.003, 0.011],
-    [0.005, 0.011], [0.007, 0.010], [0.009, 0.010], [0.011, 0.009],
-    [0.013, 0.009], [0.014, 0.008], [0.014, 0.007], [0.013, 0.007],
-    [0.011, 0.006], [0.008, 0.006], [0.005, 0.005], [0.002, 0.005],
-    [-0.002, 0.005], [-0.005, 0.005], [-0.008, 0.004], [-0.011, 0.004],
-    [-0.013, 0.004], [-0.014, 0.003], [-0.014, 0.003], [-0.012, 0.003],
-    [-0.010, 0.003], [-0.007, 0.003], [-0.004, 0.002], [-0.001, 0.002],
-    [0.002, 0.002], [0.005, 0.002], [0.008, 0.002], [0.010, 0.002],
-    [0.011, 0.002], [0.011, 0.002], [0.010, 0.001], [0.008, 0.001],
-    [0.005, 0.001], [0.002, 0.001], [-0.001, 0.001], [-0.004, 0.001],
-    [-0.006, 0.001], [-0.008, 0.001], [-0.009, 0.001], [-0.009, 0.001],
-    [-0.008, 0.001], [-0.006, 0.001], [-0.003, 0.001], [0, 0.001],
-    [0.003, 0.001], [0.005, 0.001], [0.007, 0.001], [0.008, 0.001],
-    [0.008, 0.001], [0.007, 0.001], [0.005, 0.001], [0.002, 0.001],
-    [-0.001, 0.001], [-0.003, 0.001], [-0.005, 0.001],
-  ],
+// Spray shape per automatic weapon: how far the pattern climbs (rise),
+// how far it wanders sideways (drift), and how quickly it settles.
+// The pattern is built by a seeded walk, so it is the same on every
+// load and every machine — a player can learn it like a real recoil
+// pattern. Semi-auto weapons have no entry here: their kick is one
+// impulse, not a pattern.
+const SPRAY_SHAPE = {
+  rifle: { seed: 11, rise: 0.014, drift: 0.011, settle: 0.35 },
+  smg: { seed: 23, rise: 0.010, drift: 0.009, settle: 0.5 },
+  lmg: { seed: 37, rise: 0.010, drift: 0.013, settle: 0.3 },
 };
 
-// Spray offset for shot `n` (0-based) of an automatic weapon. Semi-auto
-// weapons return no offset; their kick is a single impulse.
+// A tiny deterministic generator: a linear congruential walk in [0,1).
+// Seeded per weapon, so each gun's pattern is fixed and learnable.
+function sprayRand(seed, n) {
+  let s = (seed * 2654435761 + n * 40503) >>> 0;
+  s = (s * 1664525 + 1013904223) >>> 0;
+  return ((s >>> 8) & 0xffffff) / 0x1000000;
+}
+
+// Spray offset [x, y] in radians for shot `n` (0-based) of an automatic
+// weapon. The first shots climb, then the pattern wanders sideways and
+// settles toward a slow drift. Semi-auto weapons return no offset.
 export function sprayOffset(weaponId, n) {
-  const table = SPRAY[weaponId];
-  if (!table) return [0, 0];
-  const e = table[Math.min(n, table.length - 1)];
-  return e;
+  const shape = SPRAY_SHAPE[weaponId];
+  if (!shape) return [0, 0];
+  const climb = shape.rise * Math.min(1, n / 8); // ramps over the first 8 shots
+  const wobble = (sprayRand(shape.seed, n) - 0.5) * 2 * shape.drift;
+  const settle = 1 - shape.settle * Math.min(1, n / 20);
+  const y = climb * (0.7 + 0.3 * sprayRand(shape.seed + 5, n)) * settle + 0.002;
+  const x = wobble * (0.4 + 0.6 * Math.min(1, n / 10));
+  return [x, y];
 }
 
 export const BUY_ITEMS = [
+  { id: 'duelist', kind: 'weapon', name: 'DUELIST .44', desc: 'Heavy sidearm, two-tap at close range', price: 300 },
   { id: 'smg', kind: 'weapon', name: 'VIPER SMG', desc: 'Fast, close-range spray', price: 1100 },
   { id: 'shotgun', kind: 'weapon', name: 'MULE SHOTGUN', desc: '8 pellets, brutal up close', price: 1700 },
   { id: 'rifle', kind: 'weapon', name: 'VK-47 RIFLE', desc: 'The all-round workhorse', price: 2700 },
@@ -127,9 +119,9 @@ export const BUY_ITEMS = [
   { id: 'ammo', kind: 'gear', name: 'RESERVE AMMO', desc: 'Refill reserve for all guns', price: 250 },
 ];
 
-// Fresh loadout state for one combatant. Kept plain so bots and the player
-// share it. `sprayN` counts consecutive shots for the spray pattern and
-// resets when the trigger is released or the weapon is switched.
+// Fresh loadout state for one combatant. Kept plain so bots and the
+// player share it. `sprayN` counts consecutive shots for the spray
+// pattern and resets when the trigger is released or the weapon changes.
 export function freshLoadout() {
   return {
     weapons: { pistol: { mag: 12, reserve: 48 } },
@@ -147,10 +139,12 @@ export function giveWeapon(loadout, id) {
   return true;
 }
 
-// Damage after range falloff and armor. Returns {hp, armor} damage split.
+// Damage after range falloff and armor. Returns the {hp, armor} split:
+// the helmet halves headshot damage, and armor absorbs half of what
+// remains, up to what the vest has left.
 export function damageAfterArmor(raw, armor, helmet, isHead) {
   let dmg = raw;
-  if (isHead && helmet) dmg *= 0.5; // helmet halves headshot damage
+  if (isHead && helmet) dmg *= 0.5;
   if (armor > 0) {
     const absorbed = Math.min(armor, dmg * 0.5);
     return { hp: dmg - absorbed, armor: absorbed };

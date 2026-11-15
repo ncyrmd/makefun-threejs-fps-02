@@ -1,16 +1,23 @@
 // combat.js — hitscan shooting, damage, grenades and the bomb objective.
-// Pure simulation: it moves numbers and state, and returns visual/audio
+// Pure simulation: it moves numbers and match data, and returns visual/audio
 // events for main.js to render. It never touches the DOM.
 //
 // Two ideas carry the gunplay here:
-//  * Wall penetration. A bullet that meets a wall first measures the wall's
-//    thickness along the ray. Cover thinner than the weapon's `pen` is shot
-//    through at half damage (a "wallbang"); anything thicker stops the round.
-//    Crates and container walls are thin; warehouse steel is not.
-//  * Tagging. A hit slows its victim for a moment, so landing the first shot
-//    wins the peek — the way it does in the game this one is styled after.
+//  * Wall penetration. A bullet that meets a wall first measures the
+//    wall's thickness along the ray. Cover thinner than the weapon's
+//    `pen` is shot through at half damage (a "wallbang"); anything
+//    thicker stops the round. Crates and container walls are thin;
+//    warehouse steel is not.
+//  * Tagging. A hit slows its victim for a moment, so landing the first
+//    shot wins the peek — the way it does in the game this one is styled
+//    after.
+//
+// Hit detection is a raycast against every living combatant's body and
+// head meshes — the player included. The player carries an invisible
+// hitbox (body box + head sphere, material hidden, still raycastable),
+// so bot gunfire can actually hurt them.
 import * as THREE from 'three';
-import { WEAPONS, damageAfterArmor, sprayOffset } from './weapons.js';
+import { WEAPONS, ECONOMY, damageAfterArmor, sprayOffset } from './weapons.js';
 import { hasLineOfSight, SITE_A, SITE_B, pointBlocked } from './map.js';
 import {
   PLANT_SECONDS, DEFUSE_SECONDS, BOMB_SECONDS, TAG_SECONDS, TAG_FACTOR,
@@ -27,9 +34,10 @@ export function eyePos(c, out) {
   return out;
 }
 
-// Spread for one shot, in radians. Standing still and aiming pays; moving,
-// jumping and spraying (bloom) punish. Automatic weapons add their spray
-// pattern on top: the pattern's pull is a cost of holding the trigger.
+// Spread for one shot, in radians. Standing still and aiming pays;
+// moving, jumping and spraying (bloom) punish. Automatic weapons add
+// their spray pattern on top: the pattern's pull is the cost of holding
+// the trigger.
 export function currentSpread(c) {
   const def = WEAPONS[c.loadout.current];
   let s = def.spread;
@@ -66,16 +74,17 @@ export function finishReload(c) {
   ammo.mag += take; ammo.reserve -= take;
 }
 
-// March a ray through colliders in 0.25 m steps; returns distance to first wall.
+// March a ray through colliders in 0.25 m steps; returns the distance
+// to the first wall (or maxDist when the ray stays clear).
 export function rayWallDistance(shooter, dir, maxDist) {
   eyePos(shooter, _eye);
   const step = 0.25;
   for (let d = step; d <= maxDist; d += step) {
     const x = _eye.x + dir.x * d, y = _eye.y + dir.y * d, z = _eye.z + dir.z * d;
-    if (y <= 0.02) return d;
-    if (y > 5.5) continue;
+    if (y <= 0.02) return d; // the ground
+    if (y > 5.5) continue; // above every wall
     if (pointBlocked(x, z, 0.05, y)) return d;
-    if (Math.abs(x) > 37 || Math.abs(z) > 29) return d;
+    if (Math.abs(x) > 37 || Math.abs(z) > 29) return d; // out of the yard
   }
   return maxDist;
 }
@@ -95,11 +104,11 @@ export function wallThickness(shooter, dir, entryD) {
 }
 
 // One hitscan shot from `shooter` along `dir` (spread already applied).
-// Returns events: {type:'hit'|'kill'|'wall'|'wallbang', ...}. The ray is
-// tested against walls (slab march) and every living enemy's body/head.
-// A hit through thin cover is a wallbang: half damage, tagged, and the
-// hitmarker shows amber instead of white.
-export function fireHitscan(state, shooter, dir, now, raycaster) {
+// Returns events: {type:'hit'|'kill'|'wall'|'wallbang'|'tracer', ...}.
+// The ray is tested against walls (slab march) and every living enemy's
+// body/head. A hit through thin cover is a wallbang: half damage, tagged,
+// and the hitmarker shows amber instead of white.
+export function fireHitscan(sim, shooter, dir, now, raycaster) {
   const def = WEAPONS[shooter.loadout.current];
   const ammo = shooter.loadout.weapons[shooter.loadout.current];
   ammo.mag -= 1;
@@ -111,7 +120,7 @@ export function fireHitscan(state, shooter, dir, now, raycaster) {
   shooter.sprayN = Math.min(shooter.sprayN + 1, 60);
   const events = [];
   const pellets = def.pellets || 1;
-  const all = [state.player, ...state.bots];
+  const all = [sim.player, ...sim.bots];
   for (let p = 0; p < pellets; p++) {
     const d = _dir.copy(dir);
     d.x += sx; d.y += sy;
@@ -140,7 +149,7 @@ export function fireHitscan(state, shooter, dir, now, raycaster) {
       } else if (wallDist < def.range) {
         // The body is behind a wall: is the wall thin enough to shoot through?
         const thick = wallThickness(shooter, d, wallDist);
-        if (thick <= def.pen && first.distance < wallDist + thick + def.range) {
+        if (thick <= def.pen && first.distance < wallDist + thick + 1.5) {
           hit = first;
           wallbang = true;
         }
@@ -157,33 +166,33 @@ export function fireHitscan(state, shooter, dir, now, raycaster) {
     let raw = def.damage * fall * (isHead ? def.headMult : 1);
     if (wallbang) raw *= 0.5;
     const split = damageAfterArmor(raw, victim.loadout.armor, victim.loadout.helmet, isHead);
-    applyDamage(state, victim, split.hp, split.armor, shooter, isHead, events, wallbang);
+    applyDamage(sim, victim, split.hp, split.armor, shooter, isHead, events, wallbang);
   }
   return events;
 }
 
-export function applyDamage(state, victim, hpDmg, armorDmg, attacker, isHead, events, wallbang = false) {
+export function applyDamage(sim, victim, hpDmg, armorDmg, attacker, isHead, events, wallbang = false) {
   victim.hp -= hpDmg;
   victim.loadout.armor = Math.max(0, victim.loadout.armor - armorDmg);
   // Tagging: a hit slows the victim briefly.
   victim.tagT = TAG_SECONDS;
   if (attacker) {
     attacker.damageDealt += hpDmg;
-    if (attacker === state.player) state.stats.damage += hpDmg;
+    if (attacker === sim.player) sim.stats.damage += hpDmg;
   }
   events.push({ type: 'hit', victim, hpDmg, isHead, attacker, wallbang });
   if (victim.hp <= 0 && victim.alive) {
     victim.hp = 0; victim.alive = false; victim.deaths++;
     if (attacker) {
       attacker.kills++;
-      attacker.loadout.money += 300;
-      if (attacker === state.player) state.stats.kills++;
+      attacker.loadout.money += ECONOMY.killReward;
+      if (attacker === sim.player) sim.stats.kills++;
     }
-    if (victim === state.player) state.stats.deaths++;
+    if (victim === sim.player) sim.stats.deaths++;
     events.push({ type: 'kill', victim, attacker, isHead, wallbang });
-    if (state.bomb.state === 'carried' && state.bomb.carrierId === victim.id) {
-      state.bomb.state = 'dropped';
-      state.bomb.x = victim.x; state.bomb.z = victim.z;
+    if (sim.bomb.state === 'carried' && sim.bomb.carrierId === victim.id) {
+      sim.bomb.state = 'dropped';
+      sim.bomb.x = victim.x; sim.bomb.z = victim.z;
       events.push({ type: 'bombDropped', x: victim.x, z: victim.z });
     }
   }
@@ -192,7 +201,7 @@ export function applyDamage(state, victim, hpDmg, armorDmg, attacker, isHead, ev
 // --- grenades ---
 // Grenades land 14 m out along the throw direction, on the ground.
 // Flash blinds, smoke blocks sight for 14 s, incendiary burns a zone.
-export function throwGrenade(state, thrower, kind, dir) {
+export function throwGrenade(sim, thrower, kind, dir) {
   const loadout = thrower.loadout;
   if (kind === 'flash' && loadout.flash <= 0) return null;
   if (kind === 'smoke' && loadout.smoke <= 0) return null;
@@ -206,27 +215,28 @@ export function throwGrenade(state, thrower, kind, dir) {
   const lx = Math.max(-35, Math.min(35, landX));
   const lz = Math.max(-27, Math.min(27, landZ));
   if (kind === 'flash') {
-    state.flashes.push({ x: lx, y: 1.2, z: lz, ttl: 0.1 });
+    sim.flashes.push({ x: lx, y: 1.2, z: lz, ttl: 0.1 });
     return { kind: 'flash', x: lx, y: 1.2, z: lz };
   }
   if (kind === 'fire') {
-    state.fires.push({ x: lx, z: lz, r: 3.5, ttl: 8 });
+    sim.fires.push({ x: lx, z: lz, r: 3.5, ttl: 8 });
     return { kind: 'fire', x: lx, y: 0.5, z: lz };
   }
-  state.smokes.push({ x: lx, y: 1.0, z: lz, r: 4.5, ttl: 14 });
+  sim.smokes.push({ x: lx, y: 1.0, z: lz, r: 4.5, ttl: 14 });
   return { kind: 'smoke', x: lx, y: 1.0, z: lz };
 }
 
-// Apply a flash pop: anyone with line of sight to the pop and facing it is blind.
-export function resolveFlash(state, pop) {
-  const all = [state.player, ...state.bots];
+// Apply a flash pop: anyone with line of sight to the pop and facing it
+// is blind, longer the closer they are.
+export function resolveFlash(sim, pop) {
+  const all = [sim.player, ...sim.bots];
   for (const c of all) {
     if (!c.alive) continue;
     eyePos(c, _eye);
     const dx = pop.x - c.x, dy = pop.y - _eye.y, dz = pop.z - c.z;
     const dist = Math.hypot(dx, dy, dz);
     if (dist > 34) continue;
-    if (!hasLineOfSight(_eye, { x: pop.x, y: pop.y, z: pop.z }, state.smokes)) continue;
+    if (!hasLineOfSight(_eye, { x: pop.x, y: pop.y, z: pop.z }, sim.smokes)) continue;
     const lx = -Math.sin(c.yaw), lz = -Math.cos(c.yaw);
     const dot = (dx * lx + dz * lz) / Math.max(0.01, Math.hypot(dx, dz));
     if (dot > -0.2) {
@@ -237,22 +247,22 @@ export function resolveFlash(state, pop) {
 
 // Fire zones burn anyone standing in them: 12 damage a second, no armor.
 // Called once per fixed step from the simulation.
-export function burnFires(state, dt, events) {
-  for (const f of state.fires) {
-    const all = [state.player, ...state.bots];
+export function burnFires(sim, dt, events) {
+  for (const f of sim.fires) {
+    const all = [sim.player, ...sim.bots];
     for (const c of all) {
       if (!c.alive) continue;
       if (Math.hypot(c.x - f.x, c.z - f.z) < f.r) {
-        applyDamage(state, c, 12 * dt, 0, null, false, events);
+        applyDamage(sim, c, 12 * dt, 0, null, false, events);
       }
     }
   }
 }
 
 // A gunshot is noise: defenders within earshot rotate toward it.
-export function registerNoise(state, x, z) {
-  state.noise.push({ x, z, t: state.time });
-  if (state.noise.length > 24) state.noise.shift();
+export function registerNoise(sim, x, z) {
+  sim.noise.push({ x, z, t: sim.time });
+  if (sim.noise.length > 24) sim.noise.shift();
 }
 
 // --- bomb objective ---
@@ -266,9 +276,9 @@ export function bombSitePos(site) {
   return site === 'A' ? SITE_A : SITE_B;
 }
 
-// Channel progress for planting/defusing. A defuse kit halves the defuse.
-// Returns 'planted' | 'defused' | null.
-export function updateChannel(state, c, dt, events) {
+// Channel progress for planting/defusing, for bots. A defuse kit halves
+// the defuse. Returns 'planted' | 'defused' | null.
+export function updateChannel(sim, c, dt, events) {
   const brain = c.brain;
   if (c.id === 'player') return null;
   if (!brain || !brain.channelKind) return null;
@@ -278,15 +288,15 @@ export function updateChannel(state, c, dt, events) {
   brain.channelT += dt;
   if (brain.channelT >= need) {
     if (brain.channelKind === 'plant') {
-      state.bomb.state = 'planted';
-      state.bomb.site = siteAt(c.x, c.z);
-      state.bomb.x = c.x; state.bomb.z = c.z;
-      state.bomb.timer = BOMB_SECONDS;
+      sim.bomb.state = 'planted';
+      sim.bomb.site = siteAt(c.x, c.z);
+      sim.bomb.x = c.x; sim.bomb.z = c.z;
+      sim.bomb.timer = BOMB_SECONDS;
       brain.channelKind = null; brain.channelT = 0;
-      events.push({ type: 'planted', by: c, site: state.bomb.site });
+      events.push({ type: 'planted', by: c, site: sim.bomb.site });
       return 'planted';
     }
-    state.bomb.state = 'defused';
+    sim.bomb.state = 'defused';
     brain.channelKind = null; brain.channelT = 0;
     events.push({ type: 'defused', by: c });
     return 'defused';
@@ -295,27 +305,27 @@ export function updateChannel(state, c, dt, events) {
 }
 
 // What the player can channel by holding E: planting when carrying the
-// charge inside a site, defusing when the charge is planted and the player
-// is on the defending crew (second half), picking the charge up when it lies
-// at their feet.
-export function playerChannelTarget(state) {
-  const p = state.player;
+// charge inside a site, defusing when the charge is planted and the
+// player is on the defending crew (second half), picking the charge up
+// when it lies at their feet.
+export function playerChannelTarget(sim) {
+  const p = sim.player;
   if (!p || !p.alive) return null;
-  if (state.bomb.state === 'carried' && state.bomb.carrierId === 'player') {
+  if (sim.bomb.state === 'carried' && sim.bomb.carrierId === 'player') {
     const site = siteAt(p.x, p.z);
     if (site) return { kind: 'plant', site, need: PLANT_SECONDS };
   }
-  if (state.bomb.state === 'dropped') {
-    const d = Math.hypot(p.x - state.bomb.x, p.z - state.bomb.z);
+  if (sim.bomb.state === 'dropped') {
+    const d = Math.hypot(p.x - sim.bomb.x, p.z - sim.bomb.z);
     if (d < 1.6) return { kind: 'pickup' };
   }
-  if (state.bomb.state === 'planted' && p.team !== state.attackTeam) {
-    const site = bombSitePos(state.bomb.site);
+  if (sim.bomb.state === 'planted' && p.team !== sim.attackTeam) {
+    const site = bombSitePos(sim.bomb.site);
     const d = Math.hypot(p.x - site.x, p.z - site.z);
     if (d < 2.2) {
       return {
         kind: 'defuse',
-        site: state.bomb.site,
+        site: sim.bomb.site,
         need: p.loadout.defuseKit ? DEFUSE_SECONDS / 2 : DEFUSE_SECONDS,
       };
     }

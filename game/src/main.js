@@ -1,24 +1,30 @@
-// main.js — BLACKTIDE bootstrap, fixed-step simulation loop, player
-// controller, round flow, view-model weapon, tracers, muzzle flash and the
-// death camera. Simulation runs at a fixed 60 Hz step, decoupled from
-// rendering; the HUD only reads state after each step.
+// main.js — RIPTIDE bootstrap, fixed-step simulation loop, player
+// controller, round flow, view-model weapon, tracers, muzzle flash and
+// the death camera. Simulation runs at a fixed 60 Hz step, decoupled
+// from rendering; the HUD only reads the match data after each step.
 //
-// Night harbour lighting: a cold moon for the key light and long shadows,
-// warm amber floodlights over the yard, and a dim blue hemisphere so the
-// shadows never go black. The floodlights are spotlights without shadows;
-// only the moon casts, so the frame stays cheap.
+// Night harbour lighting: a cold moon for the key light and long
+// shadows, warm amber floodlights over the yard, and a dim blue
+// hemisphere so the shadows never go black. The floodlights are
+// spotlights without shadows; only the moon casts, so the frame stays
+// cheap.
+//
+// The player carries an invisible hitbox (body box + head sphere, their
+// material hidden but still raycastable) synced to the player's
+// position every frame, so bot gunfire can actually hit them. Without
+// it the player would be untouchable by bullets.
 import * as THREE from 'three';
-import { buildScene, moveCircle, hasLineOfSight, SITE_A, SITE_B, SPAWNS } from './map.js';
+import { buildScene, moveCircle, SITE_A, SITE_B, SPAWNS } from './map.js';
 import {
   createState, createCombatant, resetForRound, economyForRoundEnd, swapSides,
   PHASE, WIN_ROUNDS, MAX_ROUNDS, HALFTIME_ROUND, BUY_SECONDS, ROUND_SECONDS,
-  BOMB_SECONDS, PLANT_SECONDS, DEFUSE_SECONDS, TAG_FACTOR, aliveOf,
+  BOMB_SECONDS, TAG_FACTOR, aliveOf, defendTeamOf,
 } from './state.js';
-import { WEAPONS, ECONOMY, freshLoadout, giveWeapon } from './weapons.js';
+import { WEAPONS, freshLoadout, giveWeapon } from './weapons.js';
 import { SoundBank } from './audio.js';
 import { updateBot, makeBotMesh, equipBot, syncBotMesh } from './bots.js';
 import {
-  eyePos, eyeHeight, canFire, currentSpread, startReload, finishReload,
+  eyeHeight, canFire, currentSpread, startReload, finishReload,
   fireHitscan, throwGrenade, resolveFlash, siteAt, playerChannelTarget,
   applyDamage, burnFires, registerNoise,
 } from './combat.js';
@@ -29,7 +35,7 @@ const STEP = 1 / 60;
 const params = new URLSearchParams(location.search);
 const DEMO = params.get('demo') || params.get('shot') || null;
 
-const state = createState();
+const sim = createState();
 const sound = new SoundBank();
 const raycaster = new THREE.Raycaster();
 raycaster.far = 100;
@@ -127,7 +133,8 @@ bombMesh.add(bombBody, bombLed);
 bombMesh.visible = false;
 scene.add(bombMesh);
 
-// Tracers: a pool of line objects, reused.
+// ---------- effect pools (reused objects, no per-frame allocation) ----------
+// Tracers: a pool of line objects.
 const tracerPool = [];
 for (let i = 0; i < 24; i++) {
   const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
@@ -148,17 +155,31 @@ function spawnTracer(from, to, color) {
   t.ttl = 0.07;
 }
 
-// Smoke puffs + fire sprites: one sprite pool, two looks.
-const smokeSprites = [];
+// One sprite pool, two looks: smoke puffs and fire flames share it.
 const puffTex = puffTexture();
-for (let i = 0; i < 48; i++) {
-  const mat = new THREE.SpriteMaterial({ map: puffTex, color: 0xcfc8bd, transparent: true, opacity: 0, depthWrite: false });
-  const sp = new THREE.Sprite(mat);
-  sp.visible = false; sp.scale.set(6, 6, 1);
-  scene.add(sp);
-  smokeSprites.push(sp);
+const sparkTex = sparkTexture();
+function makeSpritePool(n, color, scale, opacity) {
+  const pool = [];
+  for (let i = 0; i < n; i++) {
+    const mat = new THREE.SpriteMaterial({ map: puffTex, color, transparent: true, opacity: 0, depthWrite: false });
+    const sp = new THREE.Sprite(mat);
+    sp.visible = false; sp.scale.set(scale, scale, 1);
+    scene.add(sp);
+    pool.push(sp);
+  }
+  return pool;
 }
-let smokeI = 0;
+const smokeSprites = makeSpritePool(48, 0xcfc8bd, 6, 0);
+const fireSprites = makeSpritePool(24, 0xff7722, 2.2, 0);
+const sparkSprites = [];
+for (let i = 0; i < 24; i++) {
+  const mat = new THREE.SpriteMaterial({ map: sparkTex, color: 0xffb347, transparent: true, opacity: 0, depthWrite: false });
+  const sp = new THREE.Sprite(mat);
+  sp.visible = false; sp.scale.set(0.7, 0.7, 1);
+  scene.add(sp);
+  sparkSprites.push(sp);
+}
+let smokeI = 0, fireI = 0, sparkI = 0;
 function spawnPuff(x, y, z, scale = 6, opacity = 0.75, fade = 0.02) {
   const sp = smokeSprites[smokeI++ % smokeSprites.length];
   sp.position.set(x + (Math.random() - 0.5) * 3, y + Math.random() * 1.5, z + (Math.random() - 0.5) * 3);
@@ -168,17 +189,6 @@ function spawnPuff(x, y, z, scale = 6, opacity = 0.75, fade = 0.02) {
   sp.userData.fade = fade;
   sp.visible = true;
 }
-// Hot impact sparks: small, fast-fading, amber.
-const sparkSprites = [];
-const sparkTex = sparkTexture();
-for (let i = 0; i < 24; i++) {
-  const mat = new THREE.SpriteMaterial({ map: sparkTex, color: 0xffb347, transparent: true, opacity: 0, depthWrite: false });
-  const sp = new THREE.Sprite(mat);
-  sp.visible = false; sp.scale.set(0.7, 0.7, 1);
-  scene.add(sp);
-  sparkSprites.push(sp);
-}
-let sparkI = 0;
 function spawnSpark(x, y, z) {
   const sp = sparkSprites[sparkI++ % sparkSprites.length];
   sp.position.set(x, y, z);
@@ -187,16 +197,6 @@ function spawnSpark(x, y, z) {
   sp.userData.fade = 3.5;
   sp.visible = true;
 }
-// Fire flames: orange sprites that flicker over a burning zone.
-const fireSprites = [];
-for (let i = 0; i < 24; i++) {
-  const mat = new THREE.SpriteMaterial({ map: puffTex, color: 0xff7722, transparent: true, opacity: 0, depthWrite: false });
-  const sp = new THREE.Sprite(mat);
-  sp.visible = false; sp.scale.set(2.2, 3.2, 1);
-  scene.add(sp);
-  fireSprites.push(sp);
-}
-let fireI = 0;
 function spawnFlame(x, y, z) {
   const sp = fireSprites[fireI++ % fireSprites.length];
   sp.position.set(x + (Math.random() - 0.5) * 4, y + 0.6 + Math.random() * 1.2, z + (Math.random() - 0.5) * 4);
@@ -213,8 +213,8 @@ const vmMats = {
   body: new THREE.MeshStandardMaterial({ color: 0x6a727e, roughness: 0.4, metalness: 0.7, emissive: 0x2a2f36, emissiveIntensity: 0.7 }),
   grip: new THREE.MeshStandardMaterial({ color: 0x4a3a28, roughness: 0.9 }),
   accent: new THREE.MeshStandardMaterial({ color: 0x2fd8c8, roughness: 0.45, metalness: 0.6, emissive: 0x0a3a3a, emissiveIntensity: 0.6 }),
+  dark: new THREE.MeshStandardMaterial({ color: 0x14161a, roughness: 0.4, metalness: 0.8 }),
 };
-let vmBarrel = null;
 function buildViewModel(kind) {
   while (viewModel.children.length) viewModel.remove(viewModel.children[0]);
   const g = new THREE.Group();
@@ -229,11 +229,9 @@ function buildViewModel(kind) {
   mag.position.set(0, kind === 'lmg' ? -0.18 : -0.14, -0.08);
   const sight = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.06, 0.12), vmMats.accent);
   sight.position.set(0, 0.09, -0.1);
-  const rail = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.025, len * 0.85),
-    new THREE.MeshStandardMaterial({ color: 0x14161a, roughness: 0.4, metalness: 0.8 }));
+  const rail = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.025, len * 0.85), vmMats.dark);
   rail.position.set(0, 0.075, -0.02);
-  const post = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.07, 0.02),
-    new THREE.MeshStandardMaterial({ color: 0x14161a, roughness: 0.4, metalness: 0.8 }));
+  const post = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.07, 0.02), vmMats.dark);
   post.position.set(0, 0.1, -len / 2 - 0.05);
   g.add(body, barrel, grip, mag, sight, rail, post);
   if (kind === 'dmr') {
@@ -249,7 +247,6 @@ function buildViewModel(kind) {
   g.position.set(0.36, -0.32, -0.5);
   g.rotation.y = -0.5; // angle the receiver so its side reads from the camera
   viewModel.add(g);
-  vmBarrel = barrel;
   return g;
 }
 buildViewModel('pistol');
@@ -259,41 +256,69 @@ const SALVAGE_NAMES = ['REEF', 'TIDE', 'DOCK', 'PIER'];
 const SALVAGE_ROLES = ['entry', 'awp', 'lurk', 'support'];
 const HARBOUR_NAMES = ['CRANE', 'BUOY', 'GULL', 'ANCHOR', 'KEEL'];
 const HARBOUR_ROLES = ['anchor', 'rotator', 'anchor', 'rotator', 'awp'];
+
+// The player's hitbox: an invisible body box + head sphere. Their
+// material is hidden so they never render, but the raycaster still
+// intersects them — this is what lets bot gunfire hit the player.
+// (three.js raycast ignores material visibility; it only needs the mesh
+// to exist and be in the scene.)
+const hitboxMat = new THREE.MeshBasicMaterial({ visible: false });
+function makePlayerHitbox(player) {
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.85, 0.36), hitboxMat);
+  body.position.y = 0.95;
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.21, 12, 10), hitboxMat);
+  head.position.y = 1.58;
+  body.userData = { combatant: player, part: 'body' };
+  head.userData = { combatant: player, part: 'head' };
+  g.add(body, head);
+  player.mesh = g; player.bodyMesh = body; player.headMesh = head;
+  scene.add(g);
+  return g;
+}
+function syncPlayerHitbox(player) {
+  if (!player.mesh) return;
+  player.mesh.visible = player.alive;
+  if (!player.alive) return;
+  player.mesh.position.set(player.x, player.y, player.z);
+  player.mesh.rotation.y = player.yaw + Math.PI;
+  player.mesh.scale.y = player.crouched ? 0.78 : 1;
+}
+
 function spawnCombatants() {
-  state.player = createCombatant('player', 'YOU', 'salvage', -32, 0, false);
-  state.player.botIndex = 0;
-  state.bots = [];
+  sim.player = createCombatant('player', 'YOU', 'salvage', -32, 0, false);
+  sim.player.botIndex = 0;
+  makePlayerHitbox(sim.player);
+  sim.bots = [];
   SPAWNS.salvage.forEach(([x, z], i) => {
     if (i === 4) return; // the fifth spawn is the player's
     const b = createCombatant('bot-s' + i, SALVAGE_NAMES[i], 'salvage', x, z, true, SALVAGE_ROLES[i]);
     b.botIndex = i;
-    state.bots.push(b);
+    sim.bots.push(b);
   });
   SPAWNS.harbour.forEach(([x, z], i) => {
     const b = createCombatant('bot-h' + i, HARBOUR_NAMES[i], 'harbour', x, z, true, HARBOUR_ROLES[i]);
     b.botIndex = i;
-    state.bots.push(b);
+    sim.bots.push(b);
   });
-  for (const b of state.bots) makeBotMesh(scene, b);
-  for (const b of state.bots) equipBot(b, 1);
+  for (const b of sim.bots) makeBotMesh(scene, b);
+  for (const b of sim.bots) equipBot(b, 1);
 }
 spawnCombatants();
 
 function placeAtSpawns() {
-  const atk = [state.player, ...state.bots.filter((b) => b.team === state.attackTeam)];
-  const def = state.bots.filter((b) => b.team !== state.attackTeam);
-  const atkSpawns = state.attackTeam === 'salvage' ? SPAWNS.salvage : SPAWNS.harbour;
-  const defSpawns = state.attackTeam === 'salvage' ? SPAWNS.harbour : SPAWNS.salvage;
-  atk.forEach((c, i) => {
-    const s = atkSpawns[i % atkSpawns.length];
-    c.x = s[0]; c.z = s[1]; c.y = 0; c.vy = 0;
-    c.yaw = atkSpawns === SPAWNS.salvage ? -Math.PI / 2 : Math.PI / 2;
-  });
-  def.forEach((c, i) => {
-    const s = defSpawns[i % defSpawns.length];
-    c.x = s[0]; c.z = s[1]; c.y = 0; c.vy = 0;
-    c.yaw = defSpawns === SPAWNS.salvage ? -Math.PI / 2 : Math.PI / 2;
-  });
+  const atk = [sim.player, ...sim.bots.filter((b) => b.team === sim.attackTeam)];
+  const def = sim.bots.filter((b) => b.team !== sim.attackTeam);
+  const atkSpawns = sim.attackTeam === 'salvage' ? SPAWNS.salvage : SPAWNS.harbour;
+  const defSpawns = sim.attackTeam === 'salvage' ? SPAWNS.harbour : SPAWNS.salvage;
+  const face = atkSpawns === SPAWNS.salvage ? -Math.PI / 2 : Math.PI / 2;
+  for (const [list, spawns] of [[atk, atkSpawns], [def, defSpawns]]) {
+    list.forEach((c, i) => {
+      const s = spawns[i % spawns.length];
+      c.x = s[0]; c.z = s[1]; c.y = 0; c.vy = 0; c.vx = 0; c.vz = 0;
+      c.yaw = face;
+    });
+  }
 }
 
 // ---------- input ----------
@@ -305,7 +330,7 @@ let channel = null; // {kind, site, t, need}
 let channelKeyHeld = false;
 
 addEventListener('keydown', (e) => {
-  if (e.code === 'KeyM') { state.muted = !state.muted; sound.setMuted(state.muted); return; }
+  if (e.code === 'KeyM') { sim.muted = !sim.muted; sound.setMuted(sim.muted); return; }
   keys[e.code] = true;
   if (e.code === 'KeyR') tryReload();
   if (e.code === 'KeyB') toggleBuy();
@@ -323,13 +348,13 @@ addEventListener('keyup', (e) => {
   if (e.code === 'KeyE') channelKeyHeld = false;
 });
 addEventListener('mousedown', (e) => {
-  if (state.phase === PHASE.LIVE && (pointerLocked || state.demo)) {
+  if (sim.phase === PHASE.LIVE && (pointerLocked || sim.demo)) {
     if (e.button === 0) firing = true;
     if (e.button === 2) aiming = true;
   }
 });
 addEventListener('mouseup', (e) => {
-  if (e.button === 0) { firing = false; state.player.sprayN = 0; }
+  if (e.button === 0) { firing = false; sim.player.sprayN = 0; }
   if (e.button === 2) aiming = false;
 });
 addEventListener('contextmenu', (e) => e.preventDefault());
@@ -339,7 +364,7 @@ addEventListener('mousemove', (e) => {
 });
 document.addEventListener('pointerlockchange', () => {
   pointerLocked = document.pointerLockElement === renderer.domElement;
-  if (!pointerLocked && state.phase === PHASE.LIVE && !state.demo) showPause();
+  if (!pointerLocked && sim.phase === PHASE.LIVE && !sim.demo) showPause();
 });
 addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
@@ -348,37 +373,40 @@ addEventListener('resize', () => {
 });
 
 function lockPointer() {
-  if (state.demo) return;
+  if (sim.demo) return;
   renderer.domElement.requestPointerLock();
 }
 function tryReload() {
-  const p = state.player;
-  if (!p || !p.alive || state.phase !== PHASE.LIVE) return;
+  const p = sim.player;
+  if (!p || !p.alive || sim.phase !== PHASE.LIVE) return;
   if (startReload(p)) sound.reload();
 }
 function switchWeaponSlot(slot) {
-  const p = state.player;
+  const p = sim.player;
   if (!p || !p.alive) return;
-  const ids = Object.keys(p.loadout.weapons);
-  const match = ids.find((id) => WEAPONS[id].slot === slot);
-  if (match && match !== p.loadout.current) {
-    p.loadout.current = match;
+  const ids = Object.keys(p.loadout.weapons).filter((id) => WEAPONS[id].slot === slot);
+  if (!ids.length) return;
+  // Slot 1 holds two sidearms (P9 and DUELIST .44): pressing 1 cycles them.
+  const cur = ids.indexOf(p.loadout.current);
+  const next = ids[(cur + 1) % ids.length];
+  if (next !== p.loadout.current) {
+    p.loadout.current = next;
     p.reloadT = 0;
     p.sprayN = 0;
-    buildViewModel(WEAPONS[match].kind);
+    buildViewModel(WEAPONS[next].kind);
     sound.click();
   }
 }
 function tryThrow(kind) {
-  const p = state.player;
-  if (!p || !p.alive || state.phase !== PHASE.LIVE) return;
+  const p = sim.player;
+  if (!p || !p.alive || sim.phase !== PHASE.LIVE) return;
   const dir = new THREE.Vector3();
   camera.getWorldDirection(dir);
-  const res = throwGrenade(state, p, kind, dir);
+  const res = throwGrenade(sim, p, kind, dir);
   if (!res) { sound.denied(); return; }
   if (kind === 'flash') {
     sound.flashPop();
-    resolveFlash(state, res);
+    resolveFlash(sim, res);
     spawnPuff(res.x, res.y, res.z);
   } else if (kind === 'fire') {
     sound.fireWhoosh();
@@ -403,36 +431,36 @@ $('how-btn').addEventListener('click', () => {
   el.hidden = !el.hidden;
 });
 $('buy-close').addEventListener('click', () => { closeBuy(); lockPointer(); });
-$('resume-btn').addEventListener('click', () => { $('pause').hidden = true; state.paused = false; lockPointer(); });
-$('restart-btn').addEventListener('click', () => { $('pause').hidden = true; state.paused = false; startMatch(); lockPointer(); });
+$('resume-btn').addEventListener('click', () => { $('pause').hidden = true; sim.paused = false; lockPointer(); });
+$('restart-btn').addEventListener('click', () => { $('pause').hidden = true; sim.paused = false; startMatch(); lockPointer(); });
 $('again-btn').addEventListener('click', () => { $('end').hidden = true; startMatch(); lockPointer(); });
 function toggleBuy() {
-  if (state.phase !== PHASE.BUY) return;
+  if (sim.phase !== PHASE.BUY) return;
   if ($('buy').hidden) openBuy(); else closeBuy();
 }
 function openBuy() {
-  hud.renderBuy(state, onBuyClick);
+  hud.renderBuy(sim, onBuyClick);
   $('buy').hidden = false;
 }
 function onBuyClick(item) {
-  if (hud.applyBuy(state, item)) {
+  if (hud.applyBuy(sim, item)) {
     sound.buy();
-    buildViewModel(WEAPONS[state.player.loadout.current].kind);
+    buildViewModel(WEAPONS[sim.player.loadout.current].kind);
   } else sound.denied();
-  hud.renderBuy(state, onBuyClick);
+  hud.renderBuy(sim, onBuyClick);
 }
 function closeBuy() { $('buy').hidden = true; }
 
 // ---------- round flow ----------
 function startMatch() {
-  state.score = { salvage: 0, harbour: 0 };
-  state.round = 1;
-  state.half = 1;
-  state.attackTeam = 'salvage';
-  state.lossStreak = { salvage: 0, harbour: 0 };
-  state.roundHistory = [];
-  state.stats = { kills: 0, deaths: 0, damage: 0, shots: 0, hits: 0, headshots: 0, plants: 0, defuses: 0, wallbangs: 0 };
-  for (const c of [state.player, ...state.bots]) {
+  sim.score = { salvage: 0, harbour: 0 };
+  sim.round = 1;
+  sim.half = 1;
+  sim.attackTeam = 'salvage';
+  sim.lossStreak = { salvage: 0, harbour: 0 };
+  sim.roundHistory = [];
+  sim.stats = { kills: 0, deaths: 0, damage: 0, shots: 0, hits: 0, headshots: 0, plants: 0, defuses: 0, wallbangs: 0 };
+  for (const c of [sim.player, ...sim.bots]) {
     c.kills = 0; c.deaths = 0; c.damageDealt = 0;
     c.loadout = freshLoadout();
     c.team = c.id === 'player' || c.id.startsWith('bot-s') ? 'salvage' : 'harbour';
@@ -442,82 +470,79 @@ function startMatch() {
 }
 
 function startRound() {
-  // Halftime: before round 5 the crews swap roles.
-  if (state.round === HALFTIME_ROUND && state.half === 1) {
-    swapSides(state);
-    hud.showBanner('HALFTIME — SIDES SWAP', 'You defended the harbour in the first half. Now hold it.', 'info');
-  }
-  resetForRound(state);
-  placeAtSpawns();
-  for (const b of state.bots) equipBot(b, state.round);
-  // The charge rides with the attacking crew. In the first half that is the
-  // player; in the second it is the first attacker bot.
-  if (state.player.team === state.attackTeam) {
-    state.bomb.carrierId = 'player';
-  } else {
-    const ab = state.bots.find((b) => b.team === state.attackTeam);
-    state.bomb.carrierId = ab ? ab.id : 'player';
-  }
-  state.phase = PHASE.BUY;
-  state.phaseT = BUY_SECONDS;
+  // Halftime: before round 5 the crews swap roles. Clear any stale banner
+  // first — the halftime banner below must survive until the GO banner.
   hud.clearBanner();
-  if (state.round !== HALFTIME_ROUND || state.half !== 2) {
-    hud.showBanner('ROUND ' + state.round, state.round === 1 ? 'Buy up — press B for the shop' : '', 'info');
-    setTimeout(() => { if (state.phase === PHASE.BUY) hud.clearBanner(); }, 2500);
+  if (sim.round === HALFTIME_ROUND && sim.half === 1) {
+    swapSides(sim);
+    hud.showBanner('HALFTIME — SIDES SWAP', 'You attacked the harbour in the first half. Now hold it.', 'info');
+  }
+  resetForRound(sim);
+  placeAtSpawns();
+  for (const b of sim.bots) equipBot(b, sim.round);
+  // The charge rides with the attacking crew. In the first half that is
+  // the player; in the second it is the first attacker bot.
+  if (sim.player.team === sim.attackTeam) {
+    sim.bomb.carrierId = 'player';
+  } else {
+    const ab = sim.bots.find((b) => b.team === sim.attackTeam);
+    sim.bomb.carrierId = ab ? ab.id : 'player';
+  }
+  sim.phase = PHASE.BUY;
+  sim.phaseT = BUY_SECONDS;
+  if (sim.round !== HALFTIME_ROUND || sim.half !== 2) {
+    hud.showBanner('ROUND ' + sim.round, sim.round === 1 ? 'Buy up — press B for the shop' : '', 'info');
+    setTimeout(() => { if (sim.phase === PHASE.BUY) hud.clearBanner(); }, 2500);
   }
   openBuy();
-  buildViewModel(WEAPONS[state.player.loadout.current].kind);
+  buildViewModel(WEAPONS[sim.player.loadout.current].kind);
   bombMesh.visible = false;
 }
 
-function defendTeam() {
-  return state.attackTeam === 'salvage' ? 'harbour' : 'salvage';
-}
-
 function endRound(winner, reason) {
-  if (state.phase === PHASE.ROUND_END || state.phase === PHASE.MATCH_END) return;
-  state.roundWinner = winner;
-  state.roundReason = reason;
-  economyForRoundEnd(state, winner);
-  state.phase = PHASE.ROUND_END;
-  state.phaseT = 5;
-  const won = winner === state.player.team;
+  if (sim.phase === PHASE.ROUND_END || sim.phase === PHASE.MATCH_END) return;
+  sim.roundWinner = winner;
+  sim.roundReason = reason;
+  economyForRoundEnd(sim, winner);
+  sim.phase = PHASE.ROUND_END;
+  sim.phaseT = 5;
+  const won = winner === sim.player.team;
   const wName = winner === 'salvage' ? 'SALVAGERS' : 'HARBOUR WATCH';
   hud.showBanner(wName + ' WIN THE ROUND', reason, won ? 'win' : 'lose');
   if (won) sound.roundWin(); else sound.roundLose();
-  if (state.score.salvage >= WIN_ROUNDS || state.score.harbour >= WIN_ROUNDS || state.round >= MAX_ROUNDS) {
-    endMatch(state.score.salvage > state.score.harbour ? 'salvage' : 'harbour');
+  if (sim.score.salvage >= WIN_ROUNDS || sim.score.harbour >= WIN_ROUNDS || sim.round >= MAX_ROUNDS) {
+    endMatch(sim.score.salvage > sim.score.harbour ? 'salvage' : 'harbour');
   }
 }
 
 function endMatch(winner) {
-  state.winner = winner;
-  state.phase = PHASE.MATCH_END;
-  state.phaseT = 0;
+  sim.winner = winner;
+  sim.phase = PHASE.MATCH_END;
+  sim.phaseT = 0;
   if (document.pointerLockElement) document.exitPointerLock();
-  hud.renderMatchEnd(state);
+  hud.renderMatchEnd(sim);
   $('end').hidden = false;
   $('buy').hidden = true;
 }
 
 function checkRoundEnd() {
-  if (state.phase !== PHASE.LIVE) return;
-  const aAlive = aliveOf(state, state.attackTeam);
-  const dAlive = aliveOf(state, defendTeam());
-  if (state.bomb.state === 'planted') {
-    if (dAlive === 0) endRound(state.attackTeam, 'Charge planted — no defenders left to defuse it.');
+  if (sim.phase !== PHASE.LIVE) return;
+  const aAlive = aliveOf(sim, sim.attackTeam);
+  const dAlive = aliveOf(sim, defendTeamOf(sim));
+  if (sim.bomb.state === 'planted') {
+    if (dAlive === 0) endRound(sim.attackTeam, 'Charge planted — no defenders left to defuse it.');
     return;
   }
-  if (aAlive === 0) { endRound(defendTeam(), 'All attackers eliminated.'); return; }
+  if (aAlive === 0) { endRound(defendTeamOf(sim), 'All attackers eliminated.'); return; }
   if (dAlive === 0) {
-    if (state.bomb.state === 'carried' || state.bomb.state === 'dropped') {
-      endRound(state.attackTeam, 'All defenders eliminated.');
+    if (sim.bomb.state === 'carried' || sim.bomb.state === 'dropped') {
+      endRound(sim.attackTeam, 'All defenders eliminated.');
     }
     return;
   }
-  if (state.phaseT <= 0) {
-    if (state.bomb.state === 'planted') return; // bomb timer governs
-    endRound(defendTeam(), 'Time expired — the charge was never planted.');
+  if (sim.phaseT <= 0) {
+    if (sim.bomb.state === 'planted') return; // the bomb timer governs
+    endRound(defendTeamOf(sim), 'Time expired — the charge was never planted.');
   }
 }
 
@@ -533,44 +558,46 @@ function handleEvents(events) {
     } else if (ev.type === 'wall') {
       spawnSpark(ev.at.x, ev.at.y, ev.at.z);
     } else if (ev.type === 'hit') {
-      if (ev.attacker === state.player) {
-        state.stats.hits++;
-        if (ev.isHead) state.stats.headshots++;
-        if (ev.wallbang) state.stats.wallbangs++;
+      if (ev.attacker === sim.player) {
+        sim.stats.hits++;
+        if (ev.isHead) sim.stats.headshots++;
+        if (ev.wallbang) sim.stats.wallbangs++;
         hud.hitmarker(false, ev.wallbang);
         sound.hit(ev.isHead);
         const v = ev.victim;
         hud.damageNumber(worldToScreen, v.x, v.y + 1.5, v.z, ev.hpDmg, ev.isHead);
       }
-      if (ev.victim === state.player) {
+      if (ev.victim === sim.player) {
         hud.flashDamage();
         sound.hurt();
         const a = ev.attacker;
         if (a) {
-          const ang = Math.atan2(a.x - state.player.x, a.z - state.player.z);
-          const rel = (ang - (-state.player.yaw)) * 180 / Math.PI;
+          const ang = Math.atan2(a.x - sim.player.x, a.z - sim.player.z);
+          const rel = (ang - (-sim.player.yaw)) * 180 / Math.PI;
           hud.setHitDir(rel);
         }
       }
     } else if (ev.type === 'kill') {
       const wname = ev.attacker ? WEAPONS[ev.attacker.loadout.current].name : '—';
-      hud.addFeed(state, ev.attacker || ev.victim, ev.victim, wname, ev.isHead);
-      if (ev.attacker === state.player) { hud.hitmarker(true, ev.wallbang); sound.kill(); }
-      if (ev.victim === state.player) {
-        state.spectateId = pickSpectate();
+      hud.addFeed(sim, ev.attacker || ev.victim, ev.victim, wname, ev.isHead);
+      if (ev.attacker === sim.player) { hud.hitmarker(true, ev.wallbang); sound.kill(); }
+      if (ev.victim === sim.player) {
+        sim.spectateId = pickSpectate();
+        channel = null; // a dead player cannot keep channeling; hide the bar
+        hud.setPlantBar(false);
         hud.showBanner('YOU ARE DOWN', 'Spectating a teammate — next round starts soon', 'lose');
       }
     } else if (ev.type === 'planted') {
       hud.showBanner('CHARGE PLANTED — SITE ' + ev.site, 'Defend it for 35 seconds', 'info');
       sound.plantBeep();
-      if (ev.by === state.player) state.stats.plants++;
+      if (ev.by === sim.player) sim.stats.plants++;
     } else if (ev.type === 'defused') {
-      endRound(defendTeam(), 'The charge was defused.');
-      if (ev.by === state.player) state.stats.defuses++;
+      endRound(defendTeamOf(sim), 'The charge was defused.');
+      if (ev.by === sim.player) sim.stats.defuses++;
     } else if (ev.type === 'bombDropped') {
       hud.showHint('Charge dropped — pick it up (walk over it)');
     } else if (ev.type === 'bombPickup') {
-      if (ev.by === state.player) hud.showHint('You have the charge — plant at A or B');
+      if (ev.by === sim.player) hud.showHint('You have the charge — plant at A or B');
     } else if (ev.type === 'grenade') {
       if (ev.kind === 'smoke') {
         for (let i = 0; i < 6; i++) spawnPuff(ev.x, 1, ev.z);
@@ -586,7 +613,7 @@ function handleEvents(events) {
 }
 
 function pickSpectate() {
-  const mates = state.bots.filter((b) => b.team === state.player.team && b.alive);
+  const mates = sim.bots.filter((b) => b.team === sim.player.team && b.alive);
   return mates.length ? mates[0].id : null;
 }
 
@@ -597,13 +624,12 @@ function worldToScreen(x, y, z) {
 }
 
 // ---------- player simulation ----------
-const _eye = new THREE.Vector3();
 const _dir = new THREE.Vector3();
 let bobPhase = 0;
 let beepT = 0;
 
 function updatePlayer(dt) {
-  const p = state.player;
+  const p = sim.player;
   if (!p.alive) return;
   // Look
   const sens = aiming && WEAPONS[p.loadout.current].zoom ? 0.0011 : 0.0021;
@@ -640,8 +666,8 @@ function updatePlayer(dt) {
   const wx = (ix * cos - iz * sin) * speed;
   const wz = (ix * sin + iz * cos) * speed;
   const accel = p.onGround ? 14 : 5;
-  p.vx = (p.vx ?? 0) + (wx - (p.vx ?? 0)) * Math.min(1, accel * dt);
-  p.vz = (p.vz ?? 0) + (wz - (p.vz ?? 0)) * Math.min(1, accel * dt);
+  p.vx += (wx - p.vx) * Math.min(1, accel * dt);
+  p.vz += (wz - p.vz) * Math.min(1, accel * dt);
   const [nx, nz] = moveCircle(p.x, p.z, p.vx * dt, p.vz * dt, 0.4, eyeHeight(p));
   p.x = nx; p.z = nz;
   p.moving = Math.hypot(p.vx, p.vz) > 0.5;
@@ -653,15 +679,15 @@ function updatePlayer(dt) {
   if (p.y <= 0) { p.y = 0; p.vy = 0; p.onGround = true; }
   if (p.moving && p.onGround) bobPhase += dt * p.speed * 1.6;
   // Bomb pickup
-  if (state.bomb.state === 'dropped') {
-    const d = Math.hypot(p.x - state.bomb.x, p.z - state.bomb.z);
+  if (sim.bomb.state === 'dropped') {
+    const d = Math.hypot(p.x - sim.bomb.x, p.z - sim.bomb.z);
     if (d < 1.6) {
-      state.bomb.state = 'carried'; state.bomb.carrierId = 'player';
+      sim.bomb.state = 'carried'; sim.bomb.carrierId = 'player';
       handleEvents([{ type: 'bombPickup', by: p }]);
     }
   }
   // Plant / defuse channel (hold E)
-  const target = playerChannelTarget(state);
+  const target = playerChannelTarget(sim);
   if (target && target.kind !== 'pickup' && channelKeyHeld) {
     if (!channel || channel.kind !== target.kind) {
       channel = { kind: target.kind, site: target.site, t: 0, need: target.need };
@@ -670,30 +696,30 @@ function updatePlayer(dt) {
     const label = target.kind === 'plant'
       ? 'PLANTING CHARGE — SITE ' + target.site
       : 'DEFUSING CHARGE — SITE ' + target.site;
-    hud.setPlantBar(true, label, channel.t / channel.need);
+    hud.setPlantBar(true, label, Math.min(1, channel.t / channel.need));
     if (Math.floor(channel.t * 4) !== Math.floor((channel.t - dt) * 4)) sound.plantBeep();
     if (channel.t >= channel.need) {
       if (target.kind === 'plant') {
-        state.bomb.state = 'planted';
-        state.bomb.site = target.site;
-        state.bomb.x = p.x; state.bomb.z = p.z;
-        state.bomb.timer = BOMB_SECONDS;
-        state.stats.plants++;
+        sim.bomb.state = 'planted';
+        sim.bomb.site = target.site;
+        sim.bomb.x = p.x; sim.bomb.z = p.z;
+        sim.bomb.timer = BOMB_SECONDS;
+        sim.stats.plants++;
         handleEvents([{ type: 'planted', by: p, site: target.site }]);
       } else {
-        state.bomb.state = 'defused';
-        state.stats.defuses++;
+        sim.bomb.state = 'defused';
+        sim.stats.defuses++;
         handleEvents([{ type: 'defused', by: p }]);
       }
       channel = null;
       hud.setPlantBar(false);
     }
-  } else {
-    if (channel) { channel = null; hud.setPlantBar(false); }
+  } else if (channel) {
+    channel = null; hud.setPlantBar(false);
   }
   // Firing
   const def = WEAPONS[p.loadout.current];
-  if (firing && canFire(p, state.time)) {
+  if (firing && canFire(p, sim.time)) {
     const ammo = p.loadout.weapons[p.loadout.current];
     if (ammo.mag <= 0) { sound.dryFire(); firing = false; tryReload(); }
     else {
@@ -703,9 +729,9 @@ function updatePlayer(dt) {
       _dir.y += (Math.random() - 0.5) * spread * 2;
       _dir.z += (Math.random() - 0.5) * spread * 2;
       _dir.normalize();
-      const evs = fireHitscan(state, p, _dir, state.time, raycaster);
-      registerNoise(state, p.x, p.z);
-      state.stats.shots += def.pellets || 1;
+      const evs = fireHitscan(sim, p, _dir, sim.time, raycaster);
+      registerNoise(sim, p.x, p.z);
+      sim.stats.shots += def.pellets || 1;
       handleEvents(evs);
       sound.shot(def.sound, 0);
       p.pitch += def.recoil * 0.35;
@@ -716,85 +742,84 @@ function updatePlayer(dt) {
 
 // ---------- fixed-step simulation ----------
 function simulate(dt) {
-  state.time += dt;
-  if (state.phase === PHASE.BUY) {
-    state.phaseT -= dt;
-    $('buy-timer').textContent = Math.max(0, Math.ceil(state.phaseT));
-    if (state.phaseT <= 0) {
+  sim.time += dt;
+  if (sim.phase === PHASE.BUY) {
+    sim.phaseT -= dt;
+    $('buy-timer').textContent = Math.max(0, Math.ceil(sim.phaseT));
+    if (sim.phaseT <= 0) {
       closeBuy();
-      state.phase = PHASE.LIVE;
-      state.phaseT = ROUND_SECONDS;
+      sim.phase = PHASE.LIVE;
+      sim.phaseT = ROUND_SECONDS;
       hud.showBanner('GO GO GO', 'Plant the charge at A or B', 'info');
-      setTimeout(() => { if (state.phase === PHASE.LIVE) hud.clearBanner(); }, 2200);
+      setTimeout(() => { if (sim.phase === PHASE.LIVE) hud.clearBanner(); }, 2200);
     }
     return;
   }
-  if (state.phase === PHASE.ROUND_END) {
-    state.phaseT -= dt;
-    if (state.phaseT <= 0) {
-      if (state.phase === PHASE.MATCH_END) return;
-      state.round++;
+  if (sim.phase === PHASE.ROUND_END) {
+    sim.phaseT -= dt;
+    if (sim.phaseT <= 0) {
+      if (sim.phase === PHASE.MATCH_END) return;
+      sim.round++;
       startRound();
     }
     return;
   }
-  if (state.phase !== PHASE.LIVE) return;
-  state.phaseT -= dt;
+  if (sim.phase !== PHASE.LIVE) return;
+  sim.phaseT -= dt;
   // Bomb timer
-  if (state.bomb.state === 'planted') {
-    state.bomb.timer -= dt;
+  if (sim.bomb.state === 'planted') {
+    sim.bomb.timer -= dt;
     beepT -= dt;
-    if (beepT <= 0) { sound.bombBeep(state.bomb.timer < 10); beepT = state.bomb.timer < 10 ? 0.5 : 1; }
-    if (state.bomb.timer <= 0) {
-      state.bomb.state = 'exploded';
+    if (beepT <= 0) { sound.bombBeep(sim.bomb.timer < 10); beepT = sim.bomb.timer < 10 ? 0.5 : 1; }
+    if (sim.bomb.timer <= 0) {
+      sim.bomb.state = 'exploded';
       sound.explosion();
-      const site = state.bomb.site === 'A' ? SITE_A : SITE_B;
-      const all = [state.player, ...state.bots];
+      const site = sim.bomb.site === 'A' ? SITE_A : SITE_B;
+      const all = [sim.player, ...sim.bots];
       for (const c of all) {
         if (!c.alive) continue;
         const d = Math.hypot(c.x - site.x, c.z - site.z);
         if (d < 16) {
           const evs = [];
-          applyDamage(state, c, 200, 0, null, false, evs);
+          applyDamage(sim, c, 200, 0, null, false, evs);
           handleEvents(evs);
         }
       }
-      endRound(state.attackTeam, 'The charge detonated at Site ' + state.bomb.site + '.');
+      endRound(sim.attackTeam, 'The charge detonated at Site ' + sim.bomb.site + '.');
       return;
     }
   }
   // Smokes and fires decay; fires burn.
-  for (let i = state.smokes.length - 1; i >= 0; i--) {
-    state.smokes[i].ttl -= dt;
-    if (state.smokes[i].ttl <= 0) state.smokes.splice(i, 1);
+  for (let i = sim.smokes.length - 1; i >= 0; i--) {
+    sim.smokes[i].ttl -= dt;
+    if (sim.smokes[i].ttl <= 0) sim.smokes.splice(i, 1);
   }
-  for (let i = state.fires.length - 1; i >= 0; i--) {
-    state.fires[i].ttl -= dt;
-    if (state.fires[i].ttl <= 0) state.fires.splice(i, 1);
+  for (let i = sim.fires.length - 1; i >= 0; i--) {
+    sim.fires[i].ttl -= dt;
+    if (sim.fires[i].ttl <= 0) sim.fires.splice(i, 1);
   }
-  if (state.fires.length) {
+  if (sim.fires.length) {
     const evs = [];
-    burnFires(state, dt, evs);
+    burnFires(sim, dt, evs);
     handleEvents(evs);
   }
   // Old noise stops mattering.
-  for (let i = state.noise.length - 1; i >= 0; i--) {
-    if (state.time - state.noise[i].t > 6) state.noise.splice(i, 1);
+  for (let i = sim.noise.length - 1; i >= 0; i--) {
+    if (sim.time - sim.noise[i].t > 6) sim.noise.splice(i, 1);
   }
   updatePlayer(dt);
   const events = [];
-  for (const b of state.bots) updateBot(state, b, dt, raycaster, events, sound);
+  for (const b of sim.bots) updateBot(sim, b, dt, raycaster, events, sound);
   handleEvents(events);
   checkRoundEnd();
 }
 
 // ---------- render ----------
-const _v = new THREE.Vector3();
 function render(dtReal) {
-  const p = state.player;
+  const p = sim.player;
   let target = p;
-  if (!p.alive && state.spectateId) {
-    const mate = state.bots.find((b) => b.id === state.spectateId);
+  if (!p.alive && sim.spectateId) {
+    const mate = sim.bots.find((b) => b.id === sim.spectateId);
     if (mate && mate.alive) target = mate;
   }
   if (target) {
@@ -839,28 +864,29 @@ function render(dtReal) {
   for (const sp of fireSprites) {
     if (sp.visible) {
       sp.material.opacity -= dtReal * (sp.userData.fade || 1.4);
-      sp.scale.y = 3.2 + Math.sin(state.time * 13 + sp.position.x) * 0.5;
+      sp.scale.y = 3.2 + Math.sin(sim.time * 13 + sp.position.x) * 0.5;
       if (sp.material.opacity <= 0.05) sp.visible = false;
     }
   }
   // Fire lights follow the burning zones.
   for (let i = 0; i < fireLights.length; i++) {
-    const f = state.fires[i];
+    const f = sim.fires[i];
     if (f) {
       fireLights[i].position.set(f.x, 1.2, f.z);
-      fireLights[i].intensity = 22 + Math.sin(state.time * 11 + i * 2) * 6;
+      fireLights[i].intensity = 22 + Math.sin(sim.time * 11 + i * 2) * 6;
     } else {
       fireLights[i].intensity = 0;
     }
   }
   // Bomb prop + LED blink
-  if (state.bomb.state === 'planted' || state.bomb.state === 'dropped') {
+  if (sim.bomb.state === 'planted' || sim.bomb.state === 'dropped') {
     bombMesh.visible = true;
-    bombMesh.position.set(state.bomb.x, 0.16, state.bomb.z);
-    bombLed.material.color.setHex(Math.sin(state.time * 8) > 0 ? 0xff2222 : 0x550000);
+    bombMesh.position.set(sim.bomb.x, 0.16, sim.bomb.z);
+    bombLed.material.color.setHex(Math.sin(sim.time * 8) > 0 ? 0xff2222 : 0x550000);
   } else bombMesh.visible = false;
-  // Bot meshes
-  for (const b of state.bots) syncBotMesh(b);
+  // Meshes follow their combatants.
+  syncPlayerHitbox(p);
+  for (const b of sim.bots) syncBotMesh(b);
   // Flash blindness overlay
   const blind = p.blindT > 0 ? Math.min(1, p.blindT / 1.2) : 0;
   hud.setFlashWhite(blind);
@@ -869,10 +895,11 @@ function render(dtReal) {
 
 // ---------- main loop ----------
 // Fixed-step sim (1/60 s) decoupled from rendering. The frame delta is
-// clamped to 0.25 s and the sim runs up to 15 catch-up steps per frame, so
-// the match keeps real time down to ~4 FPS; beyond that the backlog is
-// dropped (acc capped at 0.5 s) instead of spiralling. The FPS counter
-// measures UNclamped frame time — clamping it would lie about the rate.
+// clamped to 0.25 s and the sim runs up to 15 catch-up steps per frame,
+// so the match keeps real time down to ~4 FPS; beyond that the backlog
+// is dropped (acc capped at 0.5 s) instead of spiralling. The FPS
+// counter measures UNclamped frame time — clamping it would lie about
+// the rate.
 let last = performance.now();
 let lastFps = last;
 let acc = 0;
@@ -883,7 +910,7 @@ function loop(now) {
   const dtReal = Math.min(0.25, (now - last) / 1000);
   const dtFps = (now - lastFps) / 1000;
   last = now; lastFps = now;
-  if (!state.paused && state.phase !== PHASE.MENU) {
+  if (!sim.paused && sim.phase !== PHASE.MENU) {
     acc += dtReal;
     let steps = 0;
     while (acc >= STEP && steps < 15) {
@@ -902,8 +929,8 @@ function loop(now) {
   // HUD at 10 Hz is plenty (minimap + numbers) and avoids a DOM write +
   // canvas redraw on every rendered frame.
   hudT += dtReal;
-  if (hudT >= 0.1 && (state.phase === PHASE.LIVE || state.phase === PHASE.BUY || state.phase === PHASE.ROUND_END || state.phase === PHASE.MATCH_END)) {
-    hud.updateHud(state);
+  if (hudT >= 0.1 && (sim.phase === PHASE.LIVE || sim.phase === PHASE.BUY || sim.phase === PHASE.ROUND_END || sim.phase === PHASE.MATCH_END)) {
+    hud.updateHud(sim);
     hudT = 0;
   }
 }
@@ -911,15 +938,16 @@ requestAnimationFrame(loop);
 
 // ---------- pause ----------
 function showPause() {
-  if (state.demo) return;
-  state.paused = true;
+  if (sim.demo) return;
+  sim.paused = true;
   $('pause').hidden = false;
 }
 
 // ---------- demo / screenshot mode ----------
 function setupDemo() {
   if (!DEMO) return;
-  state.demo = true;
+  sim.demo = true;
+  $('fps').style.display = 'none'; // screenshots must not show a perf readout
   sound.ensure();
   $('menu').hidden = true;
   $('hud').hidden = false;
@@ -927,36 +955,40 @@ function setupDemo() {
   // Skip the buy phase for play shots; keep it for the buy shot.
   if (DEMO === 'play' || DEMO === 'end') {
     closeBuy();
-    state.phase = PHASE.LIVE;
-    state.phaseT = 87;
+    sim.phase = PHASE.LIVE;
+    sim.phaseT = 87;
     // Stage a firefight down the north lane: the player looks east along
     // z=-19 with defenders spread in the open ahead of them.
-    const p = state.player;
+    const p = sim.player;
     p.x = -16; p.z = -19; p.yaw = -Math.PI / 2 + 0.05; p.pitch = 0.01;
     giveWeapon(p.loadout, 'rifle');
     buildViewModel('rifle');
     p.loadout.armor = 50; p.loadout.helmet = true; p.loadout.money = 3250;
-    const d = state.bots.filter((b) => b.team !== state.attackTeam);
+    const d = sim.bots.filter((b) => b.team !== sim.attackTeam);
     d[0].x = 0; d[0].z = -21; d[1].x = 6; d[1].z = -18; d[2].x = 12; d[2].z = -20;
     d[3].x = 18; d[3].z = -17; d[4].x = 4; d[4].z = -14;
-    const a = state.bots.filter((b) => b.team === state.attackTeam);
+    const a = sim.bots.filter((b) => b.team === sim.attackTeam);
     a[0].x = -17; a[0].z = -22; a[1].x = -13; a[1].z = -15;
-    state.score = { salvage: 2, harbour: 1 };
-    state.round = 4;
+    sim.score = { salvage: 2, harbour: 1 };
+    sim.round = 4;
     hud.clearBanner();
   }
   if (DEMO === 'buy') {
-    state.phase = PHASE.BUY;
-    state.phaseT = 12;
-    state.player.loadout.money = 4800;
-    hud.renderBuy(state, onBuyClick);
+    sim.phase = PHASE.BUY;
+    sim.phaseT = 12;
+    sim.player.loadout.money = 4800;
+    hud.renderBuy(sim, onBuyClick);
   }
   if (DEMO === 'end') {
-    state.score = { salvage: 5, harbour: 2 };
-    state.winner = 'salvage';
-    state.stats = { kills: 14, deaths: 6, damage: 1840, shots: 210, hits: 96, headshots: 11, plants: 2, defuses: 0, wallbangs: 3 };
-    for (const c of [state.player, ...state.bots]) { c.kills = 3 + Math.floor(Math.random() * 8); c.deaths = 2 + Math.floor(Math.random() * 6); c.damageDealt = 400 + Math.floor(Math.random() * 1200); }
-    state.player.kills = 14; state.player.deaths = 6; state.player.damageDealt = 1840;
+    sim.score = { salvage: 5, harbour: 2 };
+    sim.winner = 'salvage';
+    sim.stats = { kills: 14, deaths: 6, damage: 1840, shots: 210, hits: 96, headshots: 11, plants: 2, defuses: 0, wallbangs: 3 };
+    for (const c of [sim.player, ...sim.bots]) {
+      c.kills = 3 + Math.floor(Math.random() * 8);
+      c.deaths = 2 + Math.floor(Math.random() * 6);
+      c.damageDealt = 400 + Math.floor(Math.random() * 1200);
+    }
+    sim.player.kills = 14; sim.player.deaths = 6; sim.player.damageDealt = 1840;
     endMatch('salvage');
   }
   if (DEMO === 'menu') {
@@ -965,10 +997,10 @@ function setupDemo() {
     $('buy').hidden = true;
     $('hud').hidden = true;
     hud.clearBanner();
-    state.phase = PHASE.MENU;
+    sim.phase = PHASE.MENU;
   }
 }
 setupDemo();
 
 // Expose a tiny debug handle for automated testing (no network, no cheating).
-window.__blacktide = { state, version: '2.0.0', viewModel, camera, renderer, scene };
+window.__riptide = { state: sim, version: '3.0.0', viewModel, camera, renderer, scene };

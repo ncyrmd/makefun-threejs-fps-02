@@ -1,10 +1,14 @@
 // map.js — "Night Harbor": an original 72 x 56 m container port at night.
-// Salvagers (teal) spawn west and attack; Harbour Watch (orange) spawn east
-// and defend. Site A is a warehouse interior north-east; Site B is the crane
-// dock south-east; a customs house splits the mid lane. Every wall, crate and
-// container is both a mesh and an axis-aligned collider used by movement,
-// bullets and line-of-sight checks. Colliders carry a `mat` tag so the scene
-// builder picks the right material for each one.
+// Salvagers (teal) spawn west and attack; Harbour Watch (orange) spawn
+// east and defend. Site A is a warehouse interior north-east; Site B is
+// the crane dock south-east; a customs house splits the mid lane. Every
+// wall, crate and container is both a mesh and an axis-aligned collider
+// used by movement, bullets and line-of-sight checks. Colliders carry a
+// `mat` tag so the scene builder picks the right material for each one.
+//
+// The colliders are data, not code: a table of [x, z, halfX, halfZ,
+// height, material]. The waypoint graph is built from the same table, so
+// the map, the collisions and the bot navigation can never disagree.
 import * as THREE from 'three';
 import {
   groundTexture, wallTexture, containerTexture, crateTexture, metalTexture,
@@ -23,60 +27,63 @@ export const SPAWNS = {
   ],
 };
 
-// Collider: {x, z, hx, hz, h, mat} — centre, half extents, height, material.
-// mat: 'wall' | 'container' | 'crate' | 'metal' | 'hazard'. h=0: no block.
-export const COLLIDERS = [];
-function box(x, z, hx, hz, h = 3.2, mat = 'wall') {
-  COLLIDERS.push({ x, z, hx, hz, h, mat });
-  return { x, z, hx, hz, h, mat };
-}
+// Collider table: [x, z, hx, hz, height, material].
+// material: 'wall' | 'container' | 'crate' | 'metal' | 'hazard'.
+// height 0 means "no block" (kept for completeness, unused here).
+const COLLIDER_DEFS = [
+  // Perimeter walls.
+  [0, -28.6, 37, 0.6, 5, 'wall'], [0, 28.6, 37, 0.6, 5, 'wall'],
+  [-36.6, 0, 0.6, 29, 5, 'wall'], [36.6, 0, 0.6, 29, 5, 'wall'],
+  // Site A — warehouse interior, x 16..30, z -24..-10. Doors west
+  // (z -17..-13) and south (x 20..24).
+  [23, -24, 7, 0.6, 4.5, 'wall'], // north wall
+  [30, -17, 0.6, 7, 4.5, 'wall'], // east wall
+  [18, -10, 2, 0.6, 4.5, 'wall'], // south wall, west of the door
+  [27, -10, 3, 0.6, 4.5, 'wall'], // south wall, east of the door
+  [16, -20.5, 0.6, 3.5, 4.5, 'wall'], // west wall, north of the door
+  [16, -11.5, 0.6, 1.5, 4.5, 'wall'], // west wall, south of the door
+  // Warehouse interior props: pallet stacks and a shelving run.
+  [25, -21, 2, 1, 1.4, 'crate'], [19, -13, 1, 2, 1.2, 'crate'],
+  [28, -15, 0.8, 2.5, 2.4, 'metal'],
+  // Site B — crane dock. Gantry crane legs + container stacks around it.
+  [17, 11, 0.8, 0.8, 9, 'hazard'], [17, 23, 0.8, 0.8, 9, 'hazard'],
+  [26, 22, 2.5, 1.2, 2.6, 'container'], [28, 12, 1.2, 2.5, 2.6, 'container'],
+  [20, 24, 2, 1, 1.3, 'crate'], [24, 10, 1.6, 1.6, 1.3, 'crate'],
+  // Customs house, mid: x -2..6, z -7..7, doors west and east at z -2..2.
+  [2, -7, 4, 0.6, 4, 'wall'], [2, 7, 4, 0.6, 4, 'wall'],
+  [-2, -4.5, 0.6, 2.5, 4, 'wall'], [-2, 4.5, 0.6, 2.5, 4, 'wall'],
+  [6, -4.5, 0.6, 2.5, 4, 'wall'], [6, 4.5, 0.6, 2.5, 4, 'wall'],
+  // Container stacks in the mid yard (double stacks read as cover + height).
+  [-10, -2, 2.4, 1.2, 5.2, 'container'], [-8, 4, 1.2, 2.4, 2.6, 'container'],
+  [10, -4, 1.2, 1.2, 2.6, 'container'], [12, 5, 2.4, 1.2, 5.2, 'container'],
+  // North lane (A approach) cover.
+  [-24, -20, 2.2, 1.2, 2.6, 'container'], [-12, -22, 1.2, 1.2, 1.4, 'crate'],
+  [8, -20, 2, 1, 1.3, 'crate'], [-2, -18, 1, 1, 3.4, 'metal'],
+  [-20, -14, 1.4, 1.4, 1.2, 'crate'],
+  // South lane (B approach) cover.
+  [-24, 20, 2.2, 1.2, 2.6, 'container'], [-12, 22, 1.2, 1.2, 1.4, 'crate'],
+  [8, 20, 2, 1, 1.3, 'crate'], [-2, 18, 1, 1, 3.4, 'metal'],
+  [-20, 14, 1.4, 1.4, 1.2, 'crate'],
+  // Mid-lane pillars and a forklift row.
+  [14, -8, 1.2, 1.2, 1.3, 'crate'], [14, 8, 1.2, 1.2, 1.3, 'crate'],
+  [-16, -6, 1.6, 1, 1.5, 'metal'], [-16, 6, 1.6, 1, 1.5, 'metal'],
+  // Spawn cover.
+  [-28, -8, 1.5, 1, 1.3, 'crate'], [-28, 8, 1.5, 1, 1.3, 'crate'],
+  [28, -8, 1, 1.5, 1.3, 'crate'], [28, 8, 1, 1.5, 1.3, 'crate'],
+];
 
+export const COLLIDERS = [];
 export function buildColliders() {
   COLLIDERS.length = 0;
-  // Perimeter walls.
-  box(0, -28.6, 37, 0.6, 5); box(0, 28.6, 37, 0.6, 5);
-  box(-36.6, 0, 0.6, 29, 5); box(36.6, 0, 0.6, 29, 5);
-  // Site A — warehouse interior, x 16..30, z -24..-10. Doors west (z -17..-13)
-  // and south (x 20..24).
-  box(23, -24, 7, 0.6, 4.5); // north wall
-  box(30, -17, 0.6, 7, 4.5); // east wall
-  box(18, -10, 2, 0.6, 4.5); // south wall, west of the door
-  box(27, -10, 3, 0.6, 4.5); // south wall, east of the door
-  box(16, -20.5, 0.6, 3.5, 4.5); // west wall, north of the door
-  box(16, -11.5, 0.6, 1.5, 4.5); // west wall, south of the door
-  // Warehouse interior props: pallet stacks and a shelving run.
-  box(25, -21, 2, 1, 1.4, 'crate'); box(19, -13, 1, 2, 1.2, 'crate');
-  box(28, -15, 0.8, 2.5, 2.4, 'metal');
-  // Site B — crane dock. Gantry crane legs + container stacks around it.
-  box(17, 11, 0.8, 0.8, 9, 'hazard'); box(17, 23, 0.8, 0.8, 9, 'hazard');
-  box(26, 22, 2.5, 1.2, 2.6, 'container'); box(28, 12, 1.2, 2.5, 2.6, 'container');
-  box(20, 24, 2, 1, 1.3, 'crate'); box(24, 10, 1.6, 1.6, 1.3, 'crate');
-  // Customs house, mid: x -2..6, z -7..7, doors west and east at z -2..2.
-  box(2, -7, 4, 0.6, 4); box(2, 7, 4, 0.6, 4);
-  box(-2, -4.5, 0.6, 2.5, 4); box(-2, 4.5, 0.6, 2.5, 4);
-  box(6, -4.5, 0.6, 2.5, 4); box(6, 4.5, 0.6, 2.5, 4);
-  // Container stacks in the mid yard (double stacks read as cover + height).
-  box(-10, -2, 2.4, 1.2, 5.2, 'container'); box(-8, 4, 1.2, 2.4, 2.6, 'container');
-  box(10, -4, 1.2, 1.2, 2.6, 'container'); box(12, 5, 2.4, 1.2, 5.2, 'container');
-  // North lane (A approach) cover.
-  box(-24, -20, 2.2, 1.2, 2.6, 'container'); box(-12, -22, 1.2, 1.2, 1.4, 'crate');
-  box(8, -20, 2, 1, 1.3, 'crate'); box(-2, -18, 1, 1, 3.4, 'metal');
-  box(-20, -14, 1.4, 1.4, 1.2, 'crate');
-  // South lane (B approach) cover.
-  box(-24, 20, 2.2, 1.2, 2.6, 'container'); box(-12, 22, 1.2, 1.2, 1.4, 'crate');
-  box(8, 20, 2, 1, 1.3, 'crate'); box(-2, 18, 1, 1, 3.4, 'metal');
-  box(-20, 14, 1.4, 1.4, 1.2, 'crate');
-  // Mid-lane pillars and a forklift row.
-  box(14, -8, 1.2, 1.2, 1.3, 'crate'); box(14, 8, 1.2, 1.2, 1.3, 'crate');
-  box(-16, -6, 1.6, 1, 1.5, 'metal'); box(-16, 6, 1.6, 1, 1.5, 'metal');
-  // Spawn cover.
-  box(-28, -8, 1.5, 1, 1.3, 'crate'); box(-28, 8, 1.5, 1, 1.3, 'crate');
-  box(28, -8, 1, 1.5, 1.3, 'crate'); box(28, 8, 1, 1.5, 1.3, 'crate');
+  for (const [x, z, hx, hz, h, mat] of COLLIDER_DEFS) {
+    COLLIDERS.push({ x, z, hx, hz, h, mat });
+  }
   return COLLIDERS;
 }
 
 // Waypoint graph for bot navigation. Nodes are open ground; edges link
-// neighbours with a clear straight line (checked against colliders at build).
+// neighbours with a clear straight line (checked against colliders at
+// build time, so a blocked edge simply never links).
 export const WAYPOINTS = [
   [-32, 0], [-26, -8], [-26, 8], [-26, 0], // 0-3 attack spawn
   [-18, -20], [-10, -21], [-2, -20], [8, -19], [14, -17], // 4-8 north lane
@@ -89,24 +96,25 @@ export const WAYPOINTS = [
   [-4, -12], [-4, 12], [12, -12], [12, 12], // 38-41 lane connectors
 ];
 export const EDGES = [];
-function link(a, b) { EDGES.push([a, b]); }
+// Candidate links; buildGraph keeps only the ones with a clear line.
+const EDGE_PAIRS = [
+  [0, 1], [0, 2], [0, 3], [1, 4], [2, 9], [3, 14], [3, 34], [3, 35],
+  [4, 5], [5, 6], [6, 7], [7, 8], [8, 21], [8, 38], [5, 38], [6, 38],
+  [9, 10], [10, 11], [11, 12], [12, 13], [13, 26], [13, 39], [10, 39], [11, 39],
+  [14, 15], [14, 16], [15, 17], [16, 17], [17, 18], [17, 19], [18, 20], [19, 20],
+  [14, 34], [14, 35], [20, 36], [20, 37], [20, 31], [36, 31], [37, 31],
+  [21, 22], [22, 23], [22, 24], [22, 25], [21, 24], [23, 25],
+  [26, 27], [27, 28], [27, 29], [27, 30], [26, 29], [28, 30],
+  [31, 32], [31, 33], [32, 36], [33, 37], [36, 23], [37, 28],
+  [34, 38], [35, 39], [38, 40], [39, 41], [40, 17], [41, 17],
+  [40, 7], [41, 12], [38, 6], [39, 11], [34, 15], [35, 16],
+  [8, 36], [13, 37], [21, 36], [26, 37],
+];
 export function buildGraph() {
   EDGES.length = 0;
-  const pairs = [
-    [0, 1], [0, 2], [0, 3], [1, 4], [2, 9], [3, 14], [3, 34], [3, 35],
-    [4, 5], [5, 6], [6, 7], [7, 8], [8, 21], [8, 38], [5, 38], [6, 38],
-    [9, 10], [10, 11], [11, 12], [12, 13], [13, 26], [13, 39], [10, 39], [11, 39],
-    [14, 15], [14, 16], [15, 17], [16, 17], [17, 18], [17, 19], [18, 20], [19, 20],
-    [14, 34], [14, 35], [20, 36], [20, 37], [20, 31], [36, 31], [37, 31],
-    [21, 22], [22, 23], [22, 24], [22, 25], [21, 24], [23, 25],
-    [26, 27], [27, 28], [27, 29], [27, 30], [26, 29], [28, 30],
-    [31, 32], [31, 33], [32, 36], [33, 37], [36, 23], [37, 28],
-    [34, 38], [35, 39], [38, 40], [39, 41], [40, 17], [41, 17],
-    [40, 7], [41, 12], [38, 6], [39, 11], [34, 15], [35, 16],
-    [8, 36], [13, 37], [21, 36], [26, 37],
-  ];
-  for (const [a, b] of pairs) {
-    if (!segmentBlocked(WAYPOINTS[a][0], WAYPOINTS[a][1], WAYPOINTS[b][0], WAYPOINTS[b][1])) link(a, b);
+  for (const [a, b] of EDGE_PAIRS) {
+    const [ax, az] = WAYPOINTS[a], [bx, bz] = WAYPOINTS[b];
+    if (!segmentBlocked(ax, az, bx, bz)) EDGES.push([a, b]);
   }
   return EDGES;
 }
@@ -119,7 +127,8 @@ export function nearestWaypoint(x, z) {
   }
   return best;
 }
-// Breadth-first shortest path over the graph. Returns node indices incl. start+goal.
+// Breadth-first shortest path over the graph. Returns node indices
+// including start and goal; falls back to a direct hop if unconnected.
 export function findPath(from, to) {
   if (from === to) return [from];
   const prev = new Array(WAYPOINTS.length).fill(-1);
@@ -150,7 +159,9 @@ export function pointBlocked(x, z, radius, height) {
   }
   return null;
 }
-// Move a circle (radius r) from (x,z) by (dx,dz), sliding along colliders.
+// Move a circle (radius r) from (x,z) by (dx,dz), sliding along
+// colliders. Each axis is resolved on its own so a diagonal push slides
+// along a wall instead of sticking to it.
 export function moveCircle(x, z, dx, dz, r, height) {
   let nx = x + dx;
   if (!pointBlocked(nx, z, r, height)) x = nx;
@@ -220,6 +231,16 @@ export function hasLineOfSight(a, b, smokes = []) {
 
 // --- scene construction ---
 const CONTAINER_COLORS = ['#8a3a28', '#2a6a7a', '#a87a1e', '#4a5a3a', '#7a2a4a'];
+const unitBox = new THREE.BoxGeometry(1, 1, 1);
+
+function boxMesh(mat, x, y, z, sx, sy, sz, shadow = true) {
+  const m = new THREE.Mesh(unitBox, mat);
+  m.scale.set(sx, sy, sz);
+  m.position.set(x, y, z);
+  if (shadow) { m.castShadow = true; m.receiveShadow = true; }
+  return m;
+}
+
 export function buildScene(scene) {
   buildColliders();
   buildGraph();
@@ -240,57 +261,46 @@ export function buildScene(scene) {
   water.position.set(0, -0.4, 42);
   scene.add(water);
 
-  const wallMat = new THREE.MeshStandardMaterial({ map: wallTexture(), roughness: 0.85 });
-  const crateMat = new THREE.MeshStandardMaterial({ map: crateTexture(), roughness: 0.85 });
-  const metalMat = new THREE.MeshStandardMaterial({ map: metalTexture(), roughness: 0.5, metalness: 0.55 });
-  const hazardMat = new THREE.MeshStandardMaterial({ map: hazardTexture(), roughness: 0.7 });
+  const mats = {
+    wall: new THREE.MeshStandardMaterial({ map: wallTexture(), roughness: 0.85 }),
+    crate: new THREE.MeshStandardMaterial({ map: crateTexture(), roughness: 0.85 }),
+    metal: new THREE.MeshStandardMaterial({ map: metalTexture(), roughness: 0.5, metalness: 0.55 }),
+    hazard: new THREE.MeshStandardMaterial({ map: hazardTexture(), roughness: 0.7 }),
+    cap: new THREE.MeshStandardMaterial({ color: 0x232830, roughness: 1 }),
+  };
   const containerMats = CONTAINER_COLORS.map((col) => new THREE.MeshStandardMaterial({
     map: containerTexture(col), roughness: 0.8,
   }));
-  const boxGeo = new THREE.BoxGeometry(1, 1, 1);
   let ci = 0;
   for (const c of COLLIDERS) {
-    let mat = wallMat;
-    if (c.mat === 'crate') mat = crateMat;
-    else if (c.mat === 'metal') mat = metalMat;
-    else if (c.mat === 'hazard') mat = hazardMat;
-    else if (c.mat === 'container') mat = containerMats[(ci++) % containerMats.length];
-    const mesh = new THREE.Mesh(boxGeo, mat);
-    mesh.scale.set(c.hx * 2, c.h, c.hz * 2);
-    mesh.position.set(c.x, c.h / 2, c.z);
-    mesh.castShadow = true; mesh.receiveShadow = true;
+    const mat = c.mat === 'container' ? containerMats[(ci++) % containerMats.length] : mats[c.mat];
+    const mesh = boxMesh(mat, c.x, c.h / 2, c.z, c.hx * 2, c.h, c.hz * 2);
     scene.add(mesh);
     if (c.h >= 4.5) {
-      const cap = new THREE.Mesh(boxGeo, new THREE.MeshStandardMaterial({ color: 0x232830, roughness: 1 }));
-      cap.scale.set(c.hx * 2 + 0.15, 0.12, c.hz * 2 + 0.15);
-      cap.position.set(c.x, c.h + 0.06, c.z);
-      scene.add(cap);
+      // A flat cap on tall walls so their tops read as finished edges.
+      scene.add(boxMesh(mats.cap, c.x, c.h + 0.06, c.z, c.hx * 2 + 0.15, 0.12, c.hz * 2 + 0.15, false));
     }
   }
 
   // Customs house roof slab (visual only; the walls are the colliders).
-  const roof = new THREE.Mesh(boxGeo, new THREE.MeshStandardMaterial({ color: 0x2a2f38, roughness: 0.9 }));
-  roof.scale.set(9.2, 0.25, 15.2);
-  roof.position.set(2, 4.15, 0);
-  roof.castShadow = true;
+  const roof = boxMesh(
+    new THREE.MeshStandardMaterial({ color: 0x2a2f38, roughness: 0.9 }),
+    2, 4.15, 0, 9.2, 0.25, 15.2,
+  );
   scene.add(roof);
 
   // Gantry crane over Site B: beam + cab + hook (legs are colliders).
   const craneMat = new THREE.MeshStandardMaterial({ color: 0xb8860b, roughness: 0.6, metalness: 0.4 });
-  const beam = new THREE.Mesh(boxGeo, craneMat);
-  beam.scale.set(1.2, 1.2, 16);
-  beam.position.set(17, 9.4, 17);
-  beam.castShadow = true;
-  scene.add(beam);
-  const cab = new THREE.Mesh(boxGeo, new THREE.MeshStandardMaterial({ color: 0x22262e, roughness: 0.5, metalness: 0.6 }));
-  cab.scale.set(2.4, 1.8, 2.4);
-  cab.position.set(17, 8.2, 17);
-  scene.add(cab);
-  const hook = new THREE.Mesh(new THREE.BoxGeometry(0.5, 1.6, 0.5), metalMat);
+  scene.add(boxMesh(craneMat, 17, 9.4, 17, 1.2, 1.2, 16));
+  scene.add(boxMesh(
+    new THREE.MeshStandardMaterial({ color: 0x22262e, roughness: 0.5, metalness: 0.6 }),
+    17, 8.2, 17, 2.4, 1.8, 2.4,
+  ));
+  const hook = new THREE.Mesh(new THREE.BoxGeometry(0.5, 1.6, 0.5), mats.metal);
   hook.position.set(20, 7.2, 17);
   scene.add(hook);
 
-  // Site markers: glowing A / B decals on the ground.
+  // Site markers: glowing A / B decals on the ground, with a ring.
   for (const [site, letter, color] of [[SITE_A, 'A', '#2fd8c8'], [SITE_B, 'B', '#ff7a3d']]) {
     const decal = new THREE.Mesh(
       new THREE.PlaneGeometry(9, 9),
@@ -308,63 +318,49 @@ export function buildScene(scene) {
     scene.add(ring);
   }
 
-  // Neon sign on the warehouse north wall.
-  const sign = new THREE.Mesh(
-    new THREE.PlaneGeometry(10, 2.5),
-    new THREE.MeshBasicMaterial({ map: neonTexture('BLACKTIDE', '#2fd8c8'), transparent: true, depthWrite: false }),
-  );
-  sign.position.set(23, 3.4, -23.3);
-  sign.rotation.y = 0;
-  scene.add(sign);
-  const signB = new THREE.Mesh(
-    new THREE.PlaneGeometry(8, 2),
-    new THREE.MeshBasicMaterial({ map: neonTexture('CRANE DOCK', '#ff7a3d'), transparent: true, depthWrite: false }),
-  );
-  signB.position.set(23, 3.2, 27.9);
-  signB.rotation.y = Math.PI;
-  scene.add(signB);
+  // Neon signs: the harbour's name on the warehouse wall, the dock's
+  // name on the south wall, and a small one over the customs house.
+  const signs = [
+    ['RIPTIDE', '#2fd8c8', 23, 3.4, -23.3, 0, 10, 2.5],
+    ['CRANE DOCK', '#ff7a3d', 23, 3.2, 27.9, Math.PI, 8, 2],
+    ['CUSTOMS', '#ffb36b', 2, 4.6, -7.4, 0, 7, 1.6],
+  ];
+  for (const [text, color, x, y, z, ry, w, h] of signs) {
+    const sign = new THREE.Mesh(
+      new THREE.PlaneGeometry(w, h),
+      new THREE.MeshBasicMaterial({ map: neonTexture(text, color), transparent: true, depthWrite: false }),
+    );
+    sign.position.set(x, y, z);
+    sign.rotation.y = ry;
+    scene.add(sign);
+  }
 
   // Control tower silhouette at the west corner + floodlight poles.
   const towerMat = new THREE.MeshStandardMaterial({ color: 0x3a3f4a, roughness: 0.9 });
-  const tower = new THREE.Mesh(boxGeo, towerMat);
-  tower.scale.set(4, 9, 4);
-  tower.position.set(-33, 4.5, -25);
-  tower.castShadow = true;
-  scene.add(tower);
-  const towerTop = new THREE.Mesh(boxGeo, metalMat);
-  towerTop.scale.set(5, 0.8, 5);
-  towerTop.position.set(-33, 9.2, -25);
-  scene.add(towerTop);
-  const towerGlass = new THREE.Mesh(
-    boxGeo,
+  scene.add(boxMesh(towerMat, -33, 4.5, -25, 4, 9, 4));
+  scene.add(boxMesh(mats.metal, -33, 9.2, -25, 5, 0.8, 5));
+  scene.add(boxMesh(
     new THREE.MeshStandardMaterial({ color: 0x9fd8ff, emissive: 0x2a6a8a, emissiveIntensity: 1.4, roughness: 0.2 }),
-  );
-  towerGlass.scale.set(4.2, 1.2, 4.2);
-  towerGlass.position.set(-33, 8.2, -25);
-  scene.add(towerGlass);
+    -33, 8.2, -25, 4.2, 1.2, 4.2,
+  ));
 
-  // Distant stacks and a ship silhouette outside the walls, so the horizon
-  // is a working port and not void.
+  // Distant stacks and a ship silhouette outside the walls, so the
+  // horizon is a working port and not void.
   const duneMat = new THREE.MeshStandardMaterial({ color: 0x1c2733, roughness: 1 });
   const outside = [
     [-48, -32, 22, 8, 12], [48, 30, 20, 10, 14], [0, -46, 30, 7, 12],
     [-14, 46, 34, 9, 12], [50, -36, 16, 6, 12], [-50, 34, 18, 7, 10],
   ];
   for (const [x, z, w, h, d] of outside) {
-    const m = new THREE.Mesh(boxGeo, duneMat);
-    m.scale.set(w, h, d);
-    m.position.set(x, h / 2 - 0.5, z);
+    const m = boxMesh(duneMat, x, h / 2 - 0.5, z, w, h, d, false);
     scene.add(m);
   }
   // A moored ship: hull + containers, far south-east beyond the water.
-  const ship = new THREE.Mesh(boxGeo, new THREE.MeshStandardMaterial({ color: 0x14202c, roughness: 0.9 }));
-  ship.scale.set(34, 5, 8);
-  ship.position.set(24, 2.1, 56);
-  scene.add(ship);
+  scene.add(boxMesh(
+    new THREE.MeshStandardMaterial({ color: 0x14202c, roughness: 0.9 }),
+    24, 2.1, 56, 34, 5, 8, false,
+  ));
   for (let i = 0; i < 5; i++) {
-    const cont = new THREE.Mesh(boxGeo, containerMats[i % containerMats.length]);
-    cont.scale.set(5, 2.4, 2.4);
-    cont.position.set(12 + i * 6, 5.8, 56);
-    scene.add(cont);
+    scene.add(boxMesh(containerMats[i % containerMats.length], 12 + i * 6, 5.8, 56, 5, 2.4, 2.4, false));
   }
 }
