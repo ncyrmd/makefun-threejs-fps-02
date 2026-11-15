@@ -39,5 +39,5 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(port, () => {
-  console.log(`BLACKTIDE on http://localhost:${port} — open it in desktop Chrome, click DEPLOY, and play.`);
+  console.log(`RIPTIDE on http://localhost:${port} — open it in desktop Chrome, click DEPLOY, and play.`);
 });
