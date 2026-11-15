@@ -1,208 +1,52 @@
-// hud.js — every DOM update: health/ammo/money, score, timer, minimap,
-// kill feed, banners, buy menu and the match-end table. The simulation never
-// touches the DOM directly; main.js calls these after each fixed step.
-import { WEAPONS, BUY_ITEMS, giveWeapon } from './weapons.js';
-import { MAP, SITE_A, SITE_B } from './map.js';
+// hud.js — every DOM surface of BLACKTIDE: the HUD, the minimap, the buy
+// menu, the kill feed, banners and the match-end table. It reads state and
+// writes the DOM; it never runs the simulation. All lookups go through $
+// so a missing element fails loudly in development instead of silently.
+import { WEAPONS, BUY_ITEMS } from './weapons.js';
+import { SITE_A, SITE_B, MAP } from './map.js';
 
-const $ = (id) => document.getElementById(id);
-
-export function fmtTime(sec) {
-  const s = Math.max(0, Math.ceil(sec));
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
-}
-
-export function updateHud(state) {
-  const p = state.player;
-  if (!p) return;
-  const def = WEAPONS[p.loadout.current];
-  const ammo = p.loadout.weapons[p.loadout.current];
-  $('health').textContent = Math.max(0, Math.ceil(p.hp));
-  $('health').classList.toggle('low', p.hp <= 30);
-  $('armor-val').textContent = Math.round(p.loadout.armor);
-  $('helmet-val').textContent = p.loadout.helmet ? 'YES' : '—';
-  $('weapon-name').textContent = def.name + (p.reloadT > 0 ? ' — RELOADING' : '');
-  $('ammo').textContent = ammo ? ammo.mag : 0;
-  $('ammo').classList.toggle('empty', !ammo || ammo.mag === 0);
-  $('ammo-reserve').textContent = '/ ' + (ammo ? ammo.reserve : 0);
-  $('money').textContent = '$' + p.loadout.money;
-  $('score-blue').textContent = state.score.attack;
-  $('score-red').textContent = state.score.defend;
-  $('timer').textContent = fmtTime(state.phaseT);
-  $('round-label').textContent = `ROUND ${Math.min(state.round, 9)}/9`;
-  // alive pips
-  const all = [p, ...state.bots];
-  const aAlive = all.filter((c) => c.team === 'attack' && c.alive).length;
-  const dAlive = all.filter((c) => c.team === 'defend' && c.alive).length;
-  $('alive-blue').textContent = '●'.repeat(aAlive) + '○'.repeat(5 - aAlive);
-  $('alive-red').textContent = '●'.repeat(dAlive) + '○'.repeat(5 - dAlive);
-  const bomb = state.bomb;
-  $('bomb-status').textContent =
-    bomb.state === 'planted' ? `💣 PLANTED ${Math.ceil(bomb.timer)}s — ${bomb.site}` :
-    bomb.state === 'dropped' ? '💣 CHARGE DROPPED — pick it up' :
-    bomb.state === 'carried' && bomb.carrierId === 'player' ? '💣 YOU CARRY THE CHARGE' : '';
-  drawMinimap(state);
-}
-
-export function drawMinimap(state) {
-  const cv = $('minimap');
-  if (!cv) return;
-  const ctx = cv.getContext('2d');
-  const W = cv.width, H = cv.height;
-  const sx = (x) => (x - MAP.minX) / (MAP.maxX - MAP.minX) * W;
-  const sz = (z) => (z - MAP.minZ) / (MAP.maxZ - MAP.minZ) * H;
-  ctx.clearRect(0, 0, W, H);
-  ctx.fillStyle = 'rgba(60,44,26,0.9)';
-  ctx.fillRect(0, 0, W, H);
-  // sites
-  ctx.font = 'bold 13px monospace'; ctx.textAlign = 'center';
-  ctx.fillStyle = '#ffb02a'; ctx.fillText('A', sx(SITE_A.x), sz(SITE_A.z) + 4);
-  ctx.fillStyle = '#ff5a2a'; ctx.fillText('B', sx(SITE_B.x), sz(SITE_B.z) + 4);
-  // bomb
-  if (state.bomb.state === 'planted') {
-    const s = state.bomb.site === 'A' ? SITE_A : SITE_B;
-    ctx.fillStyle = '#ff2222';
-    ctx.beginPath(); ctx.arc(sx(s.x), sz(s.z), 5, 0, 7); ctx.fill();
-  } else if (state.bomb.state === 'dropped') {
-    ctx.fillStyle = '#ff2222';
-    ctx.beginPath(); ctx.arc(sx(state.bomb.x), sz(state.bomb.z), 4, 0, 7); ctx.fill();
-  }
-  // smokes
-  for (const s of state.smokes) {
-    ctx.fillStyle = 'rgba(200,200,200,0.5)';
-    ctx.beginPath(); ctx.arc(sx(s.x), sz(s.z), 7, 0, 7); ctx.fill();
-  }
-  // combatants
-  const all = state.player ? [state.player, ...state.bots] : state.bots;
-  for (const c of all) {
-    if (!c.alive) continue;
-    ctx.fillStyle = c.team === 'attack' ? '#4db2ff' : '#ff5a4d';
-    ctx.beginPath(); ctx.arc(sx(c.x), sz(c.z), c.id === 'player' ? 4.5 : 3, 0, 7); ctx.fill();
-    if (c.id === 'player') {
-      // view cone
-      ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.moveTo(sx(c.x), sz(c.z));
-      ctx.lineTo(sx(c.x) + Math.sin(-c.yaw) * 12 * -1, sz(c.z) + Math.cos(-c.yaw) * 12 * -1);
-      ctx.stroke();
-    }
-  }
-}
-
-export function addFeed(state, killer, victim, weaponName, headshot) {
-  const feed = $('feed');
-  if (!feed) return;
-  const div = document.createElement('div');
-  const kc = killer.team === 'attack' ? 'blue' : 'red';
-  const vc = victim.team === 'attack' ? 'blue' : 'red';
-  div.innerHTML = `<span class="${kc}">${escapeHtml(killer.name)}</span> <span class="w">[${escapeHtml(weaponName)}${headshot ? ' ☠' : ''}]</span> <span class="${vc}">${escapeHtml(victim.name)}</span>`;
-  feed.prepend(div);
-  while (feed.children.length > 5) feed.removeChild(feed.lastChild);
-  setTimeout(() => { if (div.parentNode) div.parentNode.removeChild(div); }, 6000);
+export function $(id) {
+  const el = document.getElementById(id);
+  if (!el) throw new Error('hud: missing element #' + id);
+  return el;
 }
 
 function escapeHtml(s) {
-  return String(s).replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
-}
-
-export function showBanner(title, sub, cls) {
-  const t = $('banner-title'), s = $('banner-sub');
-  t.textContent = title; t.className = cls || '';
-  s.textContent = sub || '';
-}
-export function clearBanner() { showBanner('', '', ''); }
-
-export function showHint(text, ms = 3500) {
-  const h = $('hint');
-  if (!h) return;
-  h.textContent = text; h.hidden = false;
-  clearTimeout(showHint._t);
-  showHint._t = setTimeout(() => { h.hidden = true; }, ms);
-}
-
-export function hitmarker(kill) {
-  const el = $('hitmarker');
-  el.classList.add('on');
-  el.classList.toggle('kill', !!kill);
-  clearTimeout(hitmarker._t);
-  hitmarker._t = setTimeout(() => el.classList.remove('on'), 110);
-}
-
-export function damageNumber(worldToScreen, x, y, z, amount, headshot) {
-  const p = worldToScreen(x, y, z);
-  if (!p) return;
-  const span = document.createElement('span');
-  span.textContent = Math.round(amount);
-  if (headshot) span.classList.add('head');
-  span.style.left = (p.x + (Math.random() - 0.5) * 30) + 'px';
-  span.style.top = (p.y - 10) + 'px';
-  $('dmgnums').appendChild(span);
-  setTimeout(() => span.remove(), 750);
-}
-
-export function flashDamage() {
-  const v = $('dmg-vignette');
-  v.style.opacity = '1';
-  setTimeout(() => { v.style.opacity = '0'; }, 130);
-}
-
-export function setFlashWhite(level) { $('flash-white').style.opacity = String(level); }
-
-export function setPlantBar(show, label, frac) {
-  const bar = $('plantbar');
-  bar.style.display = show ? 'block' : 'none';
-  if (show) {
-    $('plant-label').textContent = label;
-    $('plant-fill').style.width = Math.round(frac * 100) + '%';
-  }
-}
-
-export function setHitDir(angleDeg) {
-  const el = $('hitdir');
-  el.style.transform = `translate(-50%,-50%) rotate(${angleDeg}deg)`;
-  el.style.opacity = '1';
-  clearTimeout(setHitDir._t);
-  setHitDir._t = setTimeout(() => { el.style.opacity = '0'; }, 600);
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 // --- buy menu ---
-export function renderBuy(state, onBuy) {
-  const grid = $('buy-grid');
-  grid.innerHTML = '';
+export function renderBuy(state, onBuyClick) {
   const p = state.player;
+  const list = $('buy-list');
+  const items = BUY_ITEMS.map((item) => {
+    const owned = item.kind === 'weapon' && p.loadout.weapons[item.id];
+    const afford = p.loadout.money >= item.price;
+    const cls = owned ? 'owned' : afford ? '' : 'poor';
+    const tag = owned ? 'OWNED' : '$' + item.price;
+    return `<button class="buy-item ${cls}" data-id="${item.id}">
+      <span class="buy-name">${item.name}</span>
+      <span class="buy-desc">${item.desc}</span>
+      <span class="buy-price">${tag}</span>
+    </button>`;
+  }).join('');
+  list.innerHTML = items;
   $('buy-money').textContent = '$' + p.loadout.money;
-  const slots = $('buy-slots');
-  slots.innerHTML = '';
-  const owned = Object.keys(p.loadout.weapons).map((id) => WEAPONS[id].name);
-  for (const name of owned) {
-    const d = document.createElement('div');
-    d.className = 'slot' + (WEAPONS[p.loadout.current].name === name ? ' active' : '');
-    d.innerHTML = `<b>${escapeHtml(name)}</b>owned`;
-    slots.appendChild(d);
-  }
-  for (const item of BUY_ITEMS) {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'buy-item';
-    let ownedAlready = false;
-    if (item.kind === 'weapon') ownedAlready = !!p.loadout.weapons[item.id];
-    if (item.kind === 'gear' && item.id === 'armor') ownedAlready = p.loadout.armor >= 50;
-    if (item.kind === 'gear' && item.id === 'helmet') ownedAlready = p.loadout.helmet;
-    const cant = !ownedAlready && p.loadout.money < item.price;
-    if (ownedAlready) btn.classList.add('owned');
-    if (cant) btn.classList.add('cant');
-    btn.innerHTML = `<span><span class="nm">${escapeHtml(item.name)}</span><br><span class="ds">${escapeHtml(item.desc)}</span></span><span class="pr">${ownedAlready ? 'OWNED' : '$' + item.price}</span>`;
-    btn.addEventListener('click', () => onBuy(item));
-    grid.appendChild(btn);
+  for (const btn of list.querySelectorAll('.buy-item')) {
+    btn.addEventListener('click', () => onBuyClick(BUY_ITEMS.find((i) => i.id === btn.dataset.id)));
   }
 }
 
 export function applyBuy(state, item) {
   const p = state.player;
-  if (!p) return false;
+  if (!item) return false;
   if (item.kind === 'weapon') {
     if (p.loadout.weapons[item.id]) return false;
     if (p.loadout.money < item.price) return false;
     p.loadout.money -= item.price;
-    giveWeapon(p.loadout, item.id);
+    p.loadout.weapons[item.id] = { mag: WEAPONS[item.id].mag, reserve: WEAPONS[item.id].reserve };
+    p.loadout.current = item.id;
+    p.sprayN = 0;
     return true;
   }
   if (item.id === 'armor') {
@@ -213,6 +57,10 @@ export function applyBuy(state, item) {
     if (p.loadout.helmet || p.loadout.money < item.price) return false;
     p.loadout.money -= item.price; p.loadout.helmet = true; return true;
   }
+  if (item.id === 'defuse') {
+    if (p.loadout.defuseKit || p.loadout.money < item.price) return false;
+    p.loadout.money -= item.price; p.loadout.defuseKit = true; return true;
+  }
   if (item.id === 'flash') {
     if (p.loadout.money < item.price) return false;
     p.loadout.money -= item.price; p.loadout.flash++; return true;
@@ -220,6 +68,10 @@ export function applyBuy(state, item) {
   if (item.id === 'smoke') {
     if (p.loadout.money < item.price) return false;
     p.loadout.money -= item.price; p.loadout.smoke++; return true;
+  }
+  if (item.id === 'fire') {
+    if (p.loadout.money < item.price) return false;
+    p.loadout.money -= item.price; p.loadout.fire++; return true;
   }
   if (item.id === 'ammo') {
     if (p.loadout.money < item.price) return false;
@@ -232,12 +84,197 @@ export function applyBuy(state, item) {
   return false;
 }
 
+// --- banners / hints ---
+let bannerTimer = 0;
+export function showBanner(title, sub, kind) {
+  const b = $('banner');
+  $('banner-title').textContent = title;
+  $('banner-sub').textContent = sub || '';
+  b.className = 'show ' + (kind || 'info');
+  clearTimeout(bannerTimer);
+}
+export function clearBanner() {
+  $('banner').className = '';
+}
+export function showHint(text) {
+  const h = $('hint');
+  h.textContent = text;
+  h.className = 'show';
+  clearTimeout(h._t);
+  h._t = setTimeout(() => { h.className = ''; }, 4000);
+}
+export function showCallout(text) {
+  const c = $('callout');
+  c.textContent = text;
+  c.className = 'show';
+  clearTimeout(c._t);
+  c._t = setTimeout(() => { c.className = ''; }, 3500);
+}
+
+// --- kill feed / hitmarkers / damage ---
+export function addFeed(state, attacker, victim, weaponName, isHead) {
+  const feed = $('feed');
+  const a = attacker ? `<span class="${attacker.team === 'salvage' ? 'teal' : 'orange'}">${escapeHtml(attacker.name)}</span>` : '';
+  const v = `<span class="${victim.team === 'salvage' ? 'teal' : 'orange'}">${escapeHtml(victim.name)}</span>`;
+  const div = document.createElement('div');
+  div.innerHTML = `${a} <span class="feed-weapon">[${escapeHtml(weaponName)}${isHead ? ' ☠' : ''}]</span> ${v}`;
+  feed.prepend(div);
+  while (feed.children.length > 5) feed.removeChild(feed.lastChild);
+}
+
+let hitTimer = 0;
+export function hitmarker(isKill, isWallbang) {
+  const h = $('hitmarker');
+  h.className = 'on' + (isKill ? ' kill' : '') + (isWallbang ? ' wallbang' : '');
+  clearTimeout(hitTimer);
+  hitTimer = setTimeout(() => { h.className = ''; }, 160);
+}
+
+export function damageNumber(toScreen, x, y, z, dmg, isHead) {
+  const pos = toScreen(x, y, z);
+  if (!pos) return;
+  const el = document.createElement('div');
+  el.className = 'dmg-num' + (isHead ? ' head' : '');
+  el.textContent = Math.round(dmg);
+  el.style.left = pos.x + 'px';
+  el.style.top = pos.y + 'px';
+  $('dmg-numbers').appendChild(el);
+  setTimeout(() => el.remove(), 700);
+}
+
+export function flashDamage() {
+  const v = $('dmg-vignette');
+  v.style.opacity = '1';
+  setTimeout(() => { v.style.opacity = '0'; }, 180);
+}
+
+export function setHitDir(deg) {
+  const h = $('hitdir');
+  h.style.transform = `translate(-50%,-50%) rotate(${deg}deg)`;
+  h.style.opacity = '1';
+  clearTimeout(h._t);
+  h._t = setTimeout(() => { h.style.opacity = '0'; }, 600);
+}
+
+export function setFlashWhite(amount) {
+  $('flash-white').style.opacity = String(amount);
+}
+
+export function setPlantBar(show, label, frac) {
+  const bar = $('plant-bar');
+  if (!show) { bar.className = ''; return; }
+  bar.className = 'show';
+  $('plant-label').textContent = label;
+  $('plant-fill').style.width = Math.round(frac * 100) + '%';
+}
+
+// --- HUD refresh (called once a second and after every phase change) ---
+export function updateHud(state) {
+  const p = state.player;
+  if (!p) return;
+  $('health').textContent = Math.max(0, Math.ceil(p.hp));
+  $('health').className = p.hp <= 30 ? 'low' : '';
+  $('armor').textContent = p.loadout.armor > 0
+    ? `ARMOR ${Math.ceil(p.loadout.armor)}${p.loadout.helmet ? ' + HELMET' : ''}`
+    : (p.loadout.helmet ? 'HELMET' : 'NO ARMOR');
+  $('kit').textContent = p.loadout.defuseKit ? 'DEFUSE KIT' : '';
+  $('kit').style.display = p.loadout.defuseKit ? 'block' : 'none';
+  const def = WEAPONS[p.loadout.current];
+  const ammo = p.loadout.weapons[p.loadout.current];
+  $('weapon-name').textContent = def.name;
+  $('ammo-mag').textContent = ammo ? ammo.mag : 0;
+  $('ammo-reserve').textContent = ammo ? ammo.reserve : 0;
+  $('money').textContent = '$' + p.loadout.money;
+  $('util-flash').textContent = 'FLASH ×' + p.loadout.flash;
+  $('util-smoke').textContent = 'SMOKE ×' + p.loadout.smoke;
+  $('util-fire').textContent = 'FIRE ×' + p.loadout.fire;
+  // Score, timer, round, halftime.
+  $('score-salvage').textContent = state.score.salvage;
+  $('score-harbour').textContent = state.score.harbour;
+  $('timer').textContent = state.phase === 'live' || state.phase === 'buy'
+    ? String(Math.max(0, Math.ceil(state.phaseT)))
+    : '—';
+  $('round-label').textContent = 'ROUND ' + state.round + ' / ' + 9 + (state.half === 2 ? ' · 2ND HALF' : ' · 1ST HALF');
+  // Round history dots from the player's side.
+  $('round-history').textContent = state.roundHistory.map((r) => (r === 'W' ? '●' : '○')).join(' ');
+  // Alive counts.
+  const all = [p, ...state.bots];
+  const sAlive = all.filter((c) => c.team === 'salvage' && c.alive).length;
+  const hAlive = all.filter((c) => c.team === 'harbour' && c.alive).length;
+  $('alive-salvage').textContent = sAlive;
+  $('alive-harbour').textContent = hAlive;
+  // Bomb status line.
+  const bomb = state.bomb;
+  let bombText = '';
+  if (bomb.state === 'planted') bombText = `CHARGE PLANTED — SITE ${bomb.site} · ${Math.ceil(bomb.timer)}s`;
+  else if (bomb.state === 'dropped') bombText = 'CHARGE DROPPED — pick it up';
+  else if (bomb.state === 'carried') bombText = bomb.carrierId === 'player' ? 'YOU CARRY THE CHARGE' : 'TEAMMATE CARRIES THE CHARGE';
+  $('bomb-status').textContent = bombText;
+  drawMinimap(state);
+}
+
+// --- minimap: the harbour from above, with live dots and the bomb ---
+const MM_W = 168, MM_H = 132;
+function drawMinimap(state) {
+  const cv = $('minimap');
+  const ctx = cv.getContext('2d');
+  if (cv.width !== MM_W) { cv.width = MM_W; cv.height = MM_H; }
+  ctx.clearRect(0, 0, MM_W, MM_H);
+  const sx = (x) => ((x - MAP.minX) / (MAP.maxX - MAP.minX)) * MM_W;
+  const sz = (z) => ((z - MAP.minZ) / (MAP.maxZ - MAP.minZ)) * MM_H;
+  // Yard.
+  ctx.fillStyle = 'rgba(16,22,32,0.9)';
+  ctx.fillRect(0, 0, MM_W, MM_H);
+  // Water at the south edge.
+  ctx.fillStyle = 'rgba(10,30,55,0.9)';
+  ctx.fillRect(0, MM_H - 8, MM_W, 8);
+  // Sites.
+  for (const [site, color] of [[SITE_A, '#2fd8c8'], [SITE_B, '#ff7a3d']]) {
+    ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(sx(site.x), sz(site.z), 7, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = color;
+    ctx.font = 'bold 9px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(site === SITE_A ? 'A' : 'B', sx(site.x), sz(site.z));
+  }
+  // Bomb.
+  if (state.bomb.state === 'planted' || state.bomb.state === 'dropped') {
+    ctx.fillStyle = '#ff2222';
+    ctx.beginPath(); ctx.arc(sx(state.bomb.x), sz(state.bomb.z), 4, 0, Math.PI * 2); ctx.fill();
+  }
+  // Smokes and fires.
+  for (const s of state.smokes) {
+    ctx.fillStyle = 'rgba(200,200,200,0.35)';
+    ctx.beginPath(); ctx.arc(sx(s.x), sz(s.z), 6, 0, Math.PI * 2); ctx.fill();
+  }
+  for (const f of state.fires) {
+    ctx.fillStyle = 'rgba(255,120,20,0.5)';
+    ctx.beginPath(); ctx.arc(sx(f.x), sz(f.z), 5, 0, Math.PI * 2); ctx.fill();
+  }
+  // Combatants: the player is a white triangle, teammates teal, enemies orange.
+  const all = [state.player, ...state.bots];
+  for (const c of all) {
+    if (!c || !c.alive) continue;
+    const x = sx(c.x), y = sz(c.z);
+    if (c === state.player) {
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.moveTo(x, y - 5); ctx.lineTo(x + 4, y + 4); ctx.lineTo(x - 4, y + 4);
+      ctx.closePath(); ctx.fill();
+    } else {
+      ctx.fillStyle = c.team === state.player.team ? '#2fd8c8' : '#ff7a3d';
+      ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+}
+
 export function renderMatchEnd(state) {
-  $('end-title').textContent = state.winner === 'attack' ? 'WARDENS WIN THE MATCH' : 'EMBERJACKS WIN THE MATCH';
-  $('end-sub').textContent = `Final score ${state.score.attack} — ${state.score.defend} · ` +
+  const playerTeam = state.player ? state.player.team : state.attackTeam;
+  $('end-title').textContent = state.winner === playerTeam ? 'SALVAGERS TAKE THE HARBOUR' : 'HARBOUR WATCH HOLDS THE LINE';
+  $('end-sub').textContent = `Final score ${state.score.salvage} — ${state.score.harbour} · ` +
     `You: ${state.stats.kills} kills, ${state.stats.deaths} deaths, ` +
     `${Math.round(state.stats.damage)} damage, ` +
-    `${state.stats.shots ? Math.round(100 * state.stats.hits / state.stats.shots) : 0}% accuracy`;
+    `${state.stats.shots ? Math.round(100 * state.stats.hits / state.stats.shots) : 0}% accuracy` +
+    (state.stats.wallbangs ? `, ${state.stats.wallbangs} wallbangs` : '');
   const rows = [['Player', 'K', 'D', 'Damage']];
   const all = [state.player, ...state.bots];
   for (const c of all) {
@@ -246,7 +283,7 @@ export function renderMatchEnd(state) {
   const table = $('match-stats');
   table.innerHTML = rows.map((r, i) => {
     const tag = i === 0 ? 'th' : 'td';
-    const cls = i > 0 ? (all[i - 1].team === 'attack' ? ' class="blue"' : ' class="red"') : '';
+    const cls = i > 0 ? (all[i - 1].team === 'salvage' ? ' class="teal"' : ' class="orange"') : '';
     return `<tr>${r.map((v, j) => `<${tag}${j === 0 ? cls : ''}>${j === 0 ? escapeHtml(String(v)) : v}</${tag}>`).join('')}</tr>`;
   }).join('');
 }

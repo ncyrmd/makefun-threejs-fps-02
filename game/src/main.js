@@ -1,18 +1,28 @@
-// main.js — EMBERLINE bootstrap, fixed-step simulation loop, player controller,
-// round flow, view-model weapon, tracers, muzzle flash and the death camera.
-// Simulation runs at a fixed 60 Hz step, decoupled from rendering; the HUD
-// only reads state after each step.
+// main.js — BLACKTIDE bootstrap, fixed-step simulation loop, player
+// controller, round flow, view-model weapon, tracers, muzzle flash and the
+// death camera. Simulation runs at a fixed 60 Hz step, decoupled from
+// rendering; the HUD only reads state after each step.
+//
+// Night harbour lighting: a cold moon for the key light and long shadows,
+// warm amber floodlights over the yard, and a dim blue hemisphere so the
+// shadows never go black. The floodlights are spotlights without shadows;
+// only the moon casts, so the frame stays cheap.
 import * as THREE from 'three';
-import { buildScene, moveCircle, hasLineOfSight, SITE_A, SITE_B } from './map.js';
-import { createState, createCombatant, resetForRound, economyForRoundEnd,
-  PHASE, WIN_ROUNDS, MAX_ROUNDS, BUY_SECONDS, ROUND_SECONDS, BOMB_SECONDS,
-  PLANT_SECONDS, DEFUSE_SECONDS, aliveOf } from './state.js';
+import { buildScene, moveCircle, hasLineOfSight, SITE_A, SITE_B, SPAWNS } from './map.js';
+import {
+  createState, createCombatant, resetForRound, economyForRoundEnd, swapSides,
+  PHASE, WIN_ROUNDS, MAX_ROUNDS, HALFTIME_ROUND, BUY_SECONDS, ROUND_SECONDS,
+  BOMB_SECONDS, PLANT_SECONDS, DEFUSE_SECONDS, TAG_FACTOR, aliveOf,
+} from './state.js';
 import { WEAPONS, ECONOMY, freshLoadout, giveWeapon } from './weapons.js';
 import { SoundBank } from './audio.js';
 import { updateBot, makeBotMesh, equipBot, syncBotMesh } from './bots.js';
-import { eyePos, eyeHeight, canFire, currentSpread, startReload, finishReload, fireHitscan,
-  throwGrenade, resolveFlash, siteAt, playerChannelTarget, applyDamage } from './combat.js';
-import { puffTexture } from './textures.js';
+import {
+  eyePos, eyeHeight, canFire, currentSpread, startReload, finishReload,
+  fireHitscan, throwGrenade, resolveFlash, siteAt, playerChannelTarget,
+  applyDamage, burnFires, registerNoise,
+} from './combat.js';
+import { puffTexture, sparkTexture } from './textures.js';
 import * as hud from './hud.js';
 
 const STEP = 1 / 60;
@@ -29,37 +39,78 @@ const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'hi
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.type = THREE.PCFShadowMap; // PCFSoft costs too much in software rasterizers
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.05;
+renderer.toneMappingExposure = 1.25;
 document.getElementById('game').appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x2a1a12);
-scene.fog = new THREE.Fog(0x2a1a12, 45, 110);
+scene.background = new THREE.Color(0x0a1220);
+scene.fog = new THREE.Fog(0x0a1220, 42, 115);
 
-const camera = new THREE.PerspectiveCamera(74, window.innerWidth / window.innerHeight, 0.08, 220);
+const camera = new THREE.PerspectiveCamera(74, window.innerWidth / window.innerHeight, 0.08, 240);
 camera.rotation.order = 'YXZ';
 
-// Dusk lighting: low amber sun + cool sky fill + hemisphere.
-const sun = new THREE.DirectionalLight(0xffb36b, 2.4);
-sun.position.set(-28, 26, -18);
-sun.castShadow = true;
-sun.shadow.mapSize.set(2048, 2048);
-sun.shadow.camera.left = -45; sun.shadow.camera.right = 45;
-sun.shadow.camera.top = 45; sun.shadow.camera.bottom = -45;
-sun.shadow.camera.far = 120;
-scene.add(sun);
-scene.add(new THREE.HemisphereLight(0x8a6b9e, 0x4a3220, 1.1));
-const fill = new THREE.DirectionalLight(0x7a86c8, 0.5);
-fill.position.set(20, 14, 24);
-scene.add(fill);
+// Moon: cold key light, low from the north-east, casts the shadows.
+const moon = new THREE.DirectionalLight(0x9db8e8, 2.5);
+moon.position.set(30, 34, -26);
+moon.castShadow = true;
+moon.shadow.mapSize.set(1024, 1024);
+moon.shadow.camera.left = -48; moon.shadow.camera.right = 48;
+moon.shadow.camera.top = 48; moon.shadow.camera.bottom = -48;
+moon.shadow.camera.far = 140;
+scene.add(moon);
+scene.add(new THREE.HemisphereLight(0x3d5578, 0x1c1610, 1.45));
+
+// Floodlights: warm amber pools over the yard. Poles are built below.
+function floodlight(x, z, tx, tz) {
+  const spot = new THREE.SpotLight(0xffb36b, 420, 55, 0.62, 0.55, 1.4);
+  spot.position.set(x, 8.5, z);
+  spot.target.position.set(tx, 0, tz);
+  scene.add(spot);
+  scene.add(spot.target);
+  const pole = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.09, 0.12, 8.5, 8),
+    new THREE.MeshStandardMaterial({ color: 0x2a2e34, roughness: 0.6, metalness: 0.5 }),
+  );
+  pole.position.set(x, 4.25, z);
+  pole.castShadow = true;
+  scene.add(pole);
+  const lamp = new THREE.Mesh(
+    new THREE.BoxGeometry(0.7, 0.3, 0.5),
+    new THREE.MeshStandardMaterial({ color: 0xffc46b, emissive: 0xff9a2a, emissiveIntensity: 2.2 }),
+  );
+  lamp.position.set(x, 8.6, z);
+  scene.add(lamp);
+  return spot;
+}
+floodlight(-24, -20, -8, -8);
+floodlight(24, -20, 8, -8);
+floodlight(-24, 20, -8, 8);
+floodlight(24, 20, 8, 8);
+
+// The moon itself: a soft glowing sprite low in the sky, always facing
+// the camera so it reads round from every angle.
+const moonSprite = new THREE.Sprite(new THREE.SpriteMaterial({
+  map: puffTexture(), color: 0xdfeaf8, transparent: true, opacity: 0.95, fog: false,
+}));
+moonSprite.scale.set(16, 16, 1);
+moonSprite.position.set(52, 44, -70);
+scene.add(moonSprite);
 
 buildScene(scene);
 
 // Muzzle flash light (reused, no per-frame allocation).
 const muzzleLight = new THREE.PointLight(0xffc46b, 0, 9, 1.8);
 scene.add(muzzleLight);
+
+// Fire lights: a small pool, one per burning zone.
+const fireLights = [];
+for (let i = 0; i < 3; i++) {
+  const pl = new THREE.PointLight(0xff7722, 0, 12, 1.6);
+  scene.add(pl);
+  fireLights.push(pl);
+}
 
 // Bomb prop: small blinking charge, visible when planted or dropped.
 const bombMesh = new THREE.Group();
@@ -97,10 +148,10 @@ function spawnTracer(from, to, color) {
   t.ttl = 0.07;
 }
 
-// Smoke puffs: sprite pool.
+// Smoke puffs + fire sprites: one sprite pool, two looks.
 const smokeSprites = [];
 const puffTex = puffTexture();
-for (let i = 0; i < 40; i++) {
+for (let i = 0; i < 48; i++) {
   const mat = new THREE.SpriteMaterial({ map: puffTex, color: 0xcfc8bd, transparent: true, opacity: 0, depthWrite: false });
   const sp = new THREE.Sprite(mat);
   sp.visible = false; sp.scale.set(6, 6, 1);
@@ -108,21 +159,49 @@ for (let i = 0; i < 40; i++) {
   smokeSprites.push(sp);
 }
 let smokeI = 0;
-function spawnPuff(x, y, z) {
+function spawnPuff(x, y, z, scale = 6, opacity = 0.75, fade = 0.02) {
   const sp = smokeSprites[smokeI++ % smokeSprites.length];
   sp.position.set(x + (Math.random() - 0.5) * 3, y + Math.random() * 1.5, z + (Math.random() - 0.5) * 3);
-  sp.material.opacity = 0.75;
-  sp.scale.set(6, 6, 1);
-  sp.userData.fade = 0.02;
+  sp.material.opacity = opacity;
+  sp.material.color.setHex(0xcfc8bd);
+  sp.scale.set(scale, scale, 1);
+  sp.userData.fade = fade;
   sp.visible = true;
 }
-// Small, fast-fading dust kick for bullet impacts (not a smoke cloud).
-function spawnImpact(x, y, z) {
-  const sp = smokeSprites[smokeI++ % smokeSprites.length];
+// Hot impact sparks: small, fast-fading, amber.
+const sparkSprites = [];
+const sparkTex = sparkTexture();
+for (let i = 0; i < 24; i++) {
+  const mat = new THREE.SpriteMaterial({ map: sparkTex, color: 0xffb347, transparent: true, opacity: 0, depthWrite: false });
+  const sp = new THREE.Sprite(mat);
+  sp.visible = false; sp.scale.set(0.7, 0.7, 1);
+  scene.add(sp);
+  sparkSprites.push(sp);
+}
+let sparkI = 0;
+function spawnSpark(x, y, z) {
+  const sp = sparkSprites[sparkI++ % sparkSprites.length];
   sp.position.set(x, y, z);
-  sp.material.opacity = 0.45;
-  sp.scale.set(0.9, 0.9, 1);
-  sp.userData.fade = 2.2;
+  sp.material.opacity = 1;
+  sp.scale.set(0.7, 0.7, 1);
+  sp.userData.fade = 3.5;
+  sp.visible = true;
+}
+// Fire flames: orange sprites that flicker over a burning zone.
+const fireSprites = [];
+for (let i = 0; i < 24; i++) {
+  const mat = new THREE.SpriteMaterial({ map: puffTex, color: 0xff7722, transparent: true, opacity: 0, depthWrite: false });
+  const sp = new THREE.Sprite(mat);
+  sp.visible = false; sp.scale.set(2.2, 3.2, 1);
+  scene.add(sp);
+  fireSprites.push(sp);
+}
+let fireI = 0;
+function spawnFlame(x, y, z) {
+  const sp = fireSprites[fireI++ % fireSprites.length];
+  sp.position.set(x + (Math.random() - 0.5) * 4, y + 0.6 + Math.random() * 1.2, z + (Math.random() - 0.5) * 4);
+  sp.material.opacity = 0.85;
+  sp.userData.fade = 1.4;
   sp.visible = true;
 }
 
@@ -131,26 +210,25 @@ const viewModel = new THREE.Group();
 camera.add(viewModel);
 scene.add(camera);
 const vmMats = {
-  body: new THREE.MeshStandardMaterial({ color: 0x707a88, roughness: 0.4, metalness: 0.7, emissive: 0x1c2126, emissiveIntensity: 1.0 }),
-  grip: new THREE.MeshStandardMaterial({ color: 0x6b4a26, roughness: 0.9 }),
-  accent: new THREE.MeshStandardMaterial({ color: 0xe8a83a, roughness: 0.45, metalness: 0.6, emissive: 0x442200, emissiveIntensity: 0.5 }),
+  body: new THREE.MeshStandardMaterial({ color: 0x6a727e, roughness: 0.4, metalness: 0.7, emissive: 0x2a2f36, emissiveIntensity: 0.7 }),
+  grip: new THREE.MeshStandardMaterial({ color: 0x4a3a28, roughness: 0.9 }),
+  accent: new THREE.MeshStandardMaterial({ color: 0x2fd8c8, roughness: 0.45, metalness: 0.6, emissive: 0x0a3a3a, emissiveIntensity: 0.6 }),
 };
 let vmBarrel = null;
 function buildViewModel(kind) {
   while (viewModel.children.length) viewModel.remove(viewModel.children[0]);
   const g = new THREE.Group();
-  const len = kind === 'dmr' ? 0.95 : kind === 'shotgun' ? 0.8 : kind === 'smg' ? 0.55 : kind === 'rifle' ? 0.78 : 0.42;
+  const len = kind === 'dmr' ? 0.95 : kind === 'shotgun' ? 0.8 : kind === 'lmg' ? 0.92 : kind === 'smg' ? 0.55 : kind === 'rifle' ? 0.78 : 0.42;
   const body = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.13, len), vmMats.body);
   const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.34, 8), vmMats.body);
   barrel.rotation.x = Math.PI / 2;
   barrel.position.set(0, 0.02, -len / 2 - 0.12);
   const grip = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.16, 0.1), vmMats.grip);
   grip.position.set(0, -0.13, 0.08);
-  const mag = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.18, 0.09), vmMats.accent);
-  mag.position.set(0, -0.14, -0.08);
+  const mag = new THREE.Mesh(new THREE.BoxGeometry(0.06, kind === 'lmg' ? 0.26 : 0.18, 0.09), vmMats.accent);
+  mag.position.set(0, kind === 'lmg' ? -0.18 : -0.14, -0.08);
   const sight = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.06, 0.12), vmMats.accent);
   sight.position.set(0, 0.09, -0.1);
-  // Dark top rail + front post so the receiver reads as a gun, not a slab.
   const rail = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.025, len * 0.85),
     new THREE.MeshStandardMaterial({ color: 0x14161a, roughness: 0.4, metalness: 0.8 }));
   rail.position.set(0, 0.075, -0.02);
@@ -163,9 +241,13 @@ function buildViewModel(kind) {
     scope.rotation.x = Math.PI / 2; scope.position.set(0, 0.11, -0.05);
     g.add(scope);
   }
+  if (kind === 'lmg') {
+    const belt = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 0.3), vmMats.grip);
+    belt.position.set(0, -0.1, 0.18);
+    g.add(belt);
+  }
   g.position.set(0.36, -0.32, -0.5);
   g.rotation.y = -0.5; // angle the receiver so its side reads from the camera
-  g.scale.setScalar(1.0);
   viewModel.add(g);
   vmBarrel = barrel;
   return g;
@@ -173,21 +255,22 @@ function buildViewModel(kind) {
 buildViewModel('pistol');
 
 // ---------- combatants ----------
-const BOT_NAMES_ATTACK = ['VEX', 'JUNO', 'MARA', 'KIP'];
-const BOT_NAMES_DEFEND = ['ASH', 'BRICK', 'NOVA', 'SLATE', 'ORIN'];
+const SALVAGE_NAMES = ['REEF', 'TIDE', 'DOCK', 'PIER'];
+const SALVAGE_ROLES = ['entry', 'awp', 'lurk', 'support'];
+const HARBOUR_NAMES = ['CRANE', 'BUOY', 'GULL', 'ANCHOR', 'KEEL'];
+const HARBOUR_ROLES = ['anchor', 'rotator', 'anchor', 'rotator', 'awp'];
 function spawnCombatants() {
-  state.player = createCombatant('player', 'YOU', 'attack', -28, 0, false);
+  state.player = createCombatant('player', 'YOU', 'salvage', -32, 0, false);
   state.player.botIndex = 0;
   state.bots = [];
-  const spawnsA = [[-28, -8], [-28, -2], [-28, 4], [-28, 10]];
-  BOT_NAMES_ATTACK.forEach((name, i) => {
-    const b = createCombatant('bot-a' + i, name, 'attack', spawnsA[i][0], spawnsA[i][1], true);
+  SPAWNS.salvage.forEach(([x, z], i) => {
+    if (i === 4) return; // the fifth spawn is the player's
+    const b = createCombatant('bot-s' + i, SALVAGE_NAMES[i], 'salvage', x, z, true, SALVAGE_ROLES[i]);
     b.botIndex = i;
     state.bots.push(b);
   });
-  const spawnsD = [[27, -18], [27, -10], [27, 10], [27, 18], [24, 0]];
-  BOT_NAMES_DEFEND.forEach((name, i) => {
-    const b = createCombatant('bot-d' + i, name, 'defend', spawnsD[i][0], spawnsD[i][1], true);
+  SPAWNS.harbour.forEach(([x, z], i) => {
+    const b = createCombatant('bot-h' + i, HARBOUR_NAMES[i], 'harbour', x, z, true, HARBOUR_ROLES[i]);
     b.botIndex = i;
     state.bots.push(b);
   });
@@ -197,12 +280,20 @@ function spawnCombatants() {
 spawnCombatants();
 
 function placeAtSpawns() {
-  const spawnsA = [[-28, -8], [-28, -2], [-28, 4], [-28, 10], [-26, 0]];
-  const spawnsD = [[27, -18], [27, -10], [27, 10], [27, 18], [24, 0]];
-  const atk = [state.player, ...state.bots.filter((b) => b.team === 'attack')];
-  const def = state.bots.filter((b) => b.team === 'defend');
-  atk.forEach((c, i) => { c.x = spawnsA[i][0]; c.z = spawnsA[i][1]; c.y = 0; c.vy = 0; c.yaw = -Math.PI / 2; });
-  def.forEach((c, i) => { c.x = spawnsD[i][0]; c.z = spawnsD[i][1]; c.y = 0; c.vy = 0; c.yaw = Math.PI / 2; });
+  const atk = [state.player, ...state.bots.filter((b) => b.team === state.attackTeam)];
+  const def = state.bots.filter((b) => b.team !== state.attackTeam);
+  const atkSpawns = state.attackTeam === 'salvage' ? SPAWNS.salvage : SPAWNS.harbour;
+  const defSpawns = state.attackTeam === 'salvage' ? SPAWNS.harbour : SPAWNS.salvage;
+  atk.forEach((c, i) => {
+    const s = atkSpawns[i % atkSpawns.length];
+    c.x = s[0]; c.z = s[1]; c.y = 0; c.vy = 0;
+    c.yaw = atkSpawns === SPAWNS.salvage ? -Math.PI / 2 : Math.PI / 2;
+  });
+  def.forEach((c, i) => {
+    const s = defSpawns[i % defSpawns.length];
+    c.x = s[0]; c.z = s[1]; c.y = 0; c.vy = 0;
+    c.yaw = defSpawns === SPAWNS.salvage ? -Math.PI / 2 : Math.PI / 2;
+  });
 }
 
 // ---------- input ----------
@@ -223,6 +314,7 @@ addEventListener('keydown', (e) => {
   if (e.code === 'Digit3') switchWeaponSlot(3);
   if (e.code === 'Digit4') tryThrow('flash');
   if (e.code === 'Digit5') tryThrow('smoke');
+  if (e.code === 'Digit6') tryThrow('fire');
   if (e.code === 'KeyE') channelKeyHeld = true;
   if (['Space', 'Tab'].includes(e.code)) e.preventDefault();
 });
@@ -237,7 +329,7 @@ addEventListener('mousedown', (e) => {
   }
 });
 addEventListener('mouseup', (e) => {
-  if (e.button === 0) firing = false;
+  if (e.button === 0) { firing = false; state.player.sprayN = 0; }
   if (e.button === 2) aiming = false;
 });
 addEventListener('contextmenu', (e) => e.preventDefault());
@@ -272,6 +364,7 @@ function switchWeaponSlot(slot) {
   if (match && match !== p.loadout.current) {
     p.loadout.current = match;
     p.reloadT = 0;
+    p.sprayN = 0;
     buildViewModel(WEAPONS[match].kind);
     sound.click();
   }
@@ -287,6 +380,9 @@ function tryThrow(kind) {
     sound.flashPop();
     resolveFlash(state, res);
     spawnPuff(res.x, res.y, res.z);
+  } else if (kind === 'fire') {
+    sound.fireWhoosh();
+    for (let i = 0; i < 5; i++) spawnFlame(res.x, 0.2, res.z);
   } else {
     sound.smokePop();
     for (let i = 0; i < 6; i++) spawnPuff(res.x, res.y + 0.4, res.z);
@@ -329,29 +425,53 @@ function closeBuy() { $('buy').hidden = true; }
 
 // ---------- round flow ----------
 function startMatch() {
-  state.score = { attack: 0, defend: 0 };
+  state.score = { salvage: 0, harbour: 0 };
   state.round = 1;
-  state.lossStreak = { attack: 0, defend: 0 };
-  state.stats = { kills: 0, deaths: 0, damage: 0, shots: 0, hits: 0, headshots: 0, plants: 0, defuses: 0 };
+  state.half = 1;
+  state.attackTeam = 'salvage';
+  state.lossStreak = { salvage: 0, harbour: 0 };
+  state.roundHistory = [];
+  state.stats = { kills: 0, deaths: 0, damage: 0, shots: 0, hits: 0, headshots: 0, plants: 0, defuses: 0, wallbangs: 0 };
   for (const c of [state.player, ...state.bots]) {
     c.kills = 0; c.deaths = 0; c.damageDealt = 0;
     c.loadout = freshLoadout();
+    c.team = c.id === 'player' || c.id.startsWith('bot-s') ? 'salvage' : 'harbour';
   }
+  sound.craneHorn();
   startRound();
 }
 
 function startRound() {
+  // Halftime: before round 5 the crews swap roles.
+  if (state.round === HALFTIME_ROUND && state.half === 1) {
+    swapSides(state);
+    hud.showBanner('HALFTIME — SIDES SWAP', 'You defended the harbour in the first half. Now hold it.', 'info');
+  }
   resetForRound(state);
   placeAtSpawns();
   for (const b of state.bots) equipBot(b, state.round);
+  // The charge rides with the attacking crew. In the first half that is the
+  // player; in the second it is the first attacker bot.
+  if (state.player.team === state.attackTeam) {
+    state.bomb.carrierId = 'player';
+  } else {
+    const ab = state.bots.find((b) => b.team === state.attackTeam);
+    state.bomb.carrierId = ab ? ab.id : 'player';
+  }
   state.phase = PHASE.BUY;
   state.phaseT = BUY_SECONDS;
   hud.clearBanner();
-  hud.showBanner('ROUND ' + state.round, state.round === 1 ? 'Buy up — press B for the shop' : '', 'info');
-  setTimeout(() => { if (state.phase === PHASE.BUY) hud.clearBanner(); }, 2500);
+  if (state.round !== HALFTIME_ROUND || state.half !== 2) {
+    hud.showBanner('ROUND ' + state.round, state.round === 1 ? 'Buy up — press B for the shop' : '', 'info');
+    setTimeout(() => { if (state.phase === PHASE.BUY) hud.clearBanner(); }, 2500);
+  }
   openBuy();
   buildViewModel(WEAPONS[state.player.loadout.current].kind);
   bombMesh.visible = false;
+}
+
+function defendTeam() {
+  return state.attackTeam === 'salvage' ? 'harbour' : 'salvage';
 }
 
 function endRound(winner, reason) {
@@ -361,11 +481,12 @@ function endRound(winner, reason) {
   economyForRoundEnd(state, winner);
   state.phase = PHASE.ROUND_END;
   state.phaseT = 5;
-  const won = winner === 'attack';
-  hud.showBanner(won ? 'WARDENS WIN THE ROUND' : 'EMBERJACKS WIN THE ROUND', reason, won ? 'win' : 'lose');
+  const won = winner === state.player.team;
+  const wName = winner === 'salvage' ? 'SALVAGERS' : 'HARBOUR WATCH';
+  hud.showBanner(wName + ' WIN THE ROUND', reason, won ? 'win' : 'lose');
   if (won) sound.roundWin(); else sound.roundLose();
-  if (state.score.attack >= WIN_ROUNDS || state.score.defend >= WIN_ROUNDS || state.round >= MAX_ROUNDS) {
-    endMatch(state.score.attack > state.score.defend ? 'attack' : 'defend');
+  if (state.score.salvage >= WIN_ROUNDS || state.score.harbour >= WIN_ROUNDS || state.round >= MAX_ROUNDS) {
+    endMatch(state.score.salvage > state.score.harbour ? 'salvage' : 'harbour');
   }
 }
 
@@ -381,22 +502,22 @@ function endMatch(winner) {
 
 function checkRoundEnd() {
   if (state.phase !== PHASE.LIVE) return;
-  const aAlive = aliveOf(state, 'attack');
-  const dAlive = aliveOf(state, 'defend');
+  const aAlive = aliveOf(state, state.attackTeam);
+  const dAlive = aliveOf(state, defendTeam());
   if (state.bomb.state === 'planted') {
-    if (dAlive === 0) endRound('attack', 'Charge planted — no defenders left to defuse it.');
+    if (dAlive === 0) endRound(state.attackTeam, 'Charge planted — no defenders left to defuse it.');
     return;
   }
-  if (aAlive === 0) { endRound('defend', 'All Wardens eliminated.'); return; }
+  if (aAlive === 0) { endRound(defendTeam(), 'All attackers eliminated.'); return; }
   if (dAlive === 0) {
     if (state.bomb.state === 'carried' || state.bomb.state === 'dropped') {
-      endRound('attack', 'All Emberjacks eliminated.');
+      endRound(state.attackTeam, 'All defenders eliminated.');
     }
     return;
   }
   if (state.phaseT <= 0) {
     if (state.bomb.state === 'planted') return; // bomb timer governs
-    endRound('defend', 'Time expired — the charge was never planted.');
+    endRound(defendTeam(), 'Time expired — the charge was never planted.');
   }
 }
 
@@ -410,12 +531,13 @@ function handleEvents(events) {
         muzzleLight.intensity = 14;
       }
     } else if (ev.type === 'wall') {
-      spawnImpact(ev.at.x, ev.at.y, ev.at.z);
+      spawnSpark(ev.at.x, ev.at.y, ev.at.z);
     } else if (ev.type === 'hit') {
       if (ev.attacker === state.player) {
         state.stats.hits++;
         if (ev.isHead) state.stats.headshots++;
-        hud.hitmarker(false);
+        if (ev.wallbang) state.stats.wallbangs++;
+        hud.hitmarker(false, ev.wallbang);
         sound.hit(ev.isHead);
         const v = ev.victim;
         hud.damageNumber(worldToScreen, v.x, v.y + 1.5, v.z, ev.hpDmg, ev.isHead);
@@ -433,27 +555,38 @@ function handleEvents(events) {
     } else if (ev.type === 'kill') {
       const wname = ev.attacker ? WEAPONS[ev.attacker.loadout.current].name : '—';
       hud.addFeed(state, ev.attacker || ev.victim, ev.victim, wname, ev.isHead);
-      if (ev.attacker === state.player) { hud.hitmarker(true); sound.kill(); }
+      if (ev.attacker === state.player) { hud.hitmarker(true, ev.wallbang); sound.kill(); }
       if (ev.victim === state.player) {
         state.spectateId = pickSpectate();
         hud.showBanner('YOU ARE DOWN', 'Spectating a teammate — next round starts soon', 'lose');
       }
     } else if (ev.type === 'planted') {
-      hud.showBanner('CHARGE PLANTED — ' + ev.site, 'Defend it for 35 seconds', 'info');
+      hud.showBanner('CHARGE PLANTED — SITE ' + ev.site, 'Defend it for 35 seconds', 'info');
       sound.plantBeep();
       if (ev.by === state.player) state.stats.plants++;
     } else if (ev.type === 'defused') {
-      endRound('defend', 'The charge was defused.');
+      endRound(defendTeam(), 'The charge was defused.');
+      if (ev.by === state.player) state.stats.defuses++;
     } else if (ev.type === 'bombDropped') {
       hud.showHint('Charge dropped — pick it up (walk over it)');
     } else if (ev.type === 'bombPickup') {
       if (ev.by === state.player) hud.showHint('You have the charge — plant at A or B');
+    } else if (ev.type === 'grenade') {
+      if (ev.kind === 'smoke') {
+        for (let i = 0; i < 6; i++) spawnPuff(ev.x, 1, ev.z);
+      } else if (ev.kind === 'fire') {
+        for (let i = 0; i < 5; i++) spawnFlame(ev.x, 0.2, ev.z);
+      } else {
+        spawnPuff(ev.x, ev.y, ev.z);
+      }
+    } else if (ev.type === 'callout') {
+      hud.showCallout(ev.text);
     }
   }
 }
 
 function pickSpectate() {
-  const mates = state.bots.filter((b) => b.team === 'attack' && b.alive);
+  const mates = state.bots.filter((b) => b.team === state.player.team && b.alive);
   return mates.length ? mates[0].id : null;
 }
 
@@ -486,7 +619,8 @@ function updatePlayer(dt) {
     if (p.reloadT <= 0) finishReload(p);
   }
   if (p.blindT > 0) p.blindT -= dt;
-  // Movement with acceleration.
+  if (p.tagT > 0) p.tagT -= dt;
+  // Movement with acceleration. Tagging slows you after a hit.
   const walk = keys['ShiftLeft'] || keys['ShiftRight'];
   const crouch = keys['ControlLeft'] || keys['KeyC'];
   p.crouched = !!crouch;
@@ -494,6 +628,7 @@ function updatePlayer(dt) {
   if (crouch) speed = 2.2;
   if (!p.onGround) speed *= 0.85;
   if (aiming) speed *= 0.55;
+  if (p.tagT > 0) speed *= TAG_FACTOR;
   let ix = 0, iz = 0;
   if (keys['KeyW']) iz -= 1;
   if (keys['KeyS']) iz += 1;
@@ -525,20 +660,31 @@ function updatePlayer(dt) {
       handleEvents([{ type: 'bombPickup', by: p }]);
     }
   }
-  // Plant channel (hold E)
+  // Plant / defuse channel (hold E)
   const target = playerChannelTarget(state);
-  if (target && target.kind === 'plant' && channelKeyHeld) {
-    if (!channel || channel.kind !== 'plant') channel = { kind: 'plant', site: target.site, t: 0, need: PLANT_SECONDS };
+  if (target && target.kind !== 'pickup' && channelKeyHeld) {
+    if (!channel || channel.kind !== target.kind) {
+      channel = { kind: target.kind, site: target.site, t: 0, need: target.need };
+    }
     channel.t += dt;
-    hud.setPlantBar(true, 'PLANTING CHARGE — ' + target.site, channel.t / channel.need);
+    const label = target.kind === 'plant'
+      ? 'PLANTING CHARGE — SITE ' + target.site
+      : 'DEFUSING CHARGE — SITE ' + target.site;
+    hud.setPlantBar(true, label, channel.t / channel.need);
     if (Math.floor(channel.t * 4) !== Math.floor((channel.t - dt) * 4)) sound.plantBeep();
     if (channel.t >= channel.need) {
-      state.bomb.state = 'planted';
-      state.bomb.site = target.site;
-      state.bomb.x = p.x; state.bomb.z = p.z;
-      state.bomb.timer = BOMB_SECONDS;
-      state.stats.plants++;
-      handleEvents([{ type: 'planted', by: p, site: target.site }]);
+      if (target.kind === 'plant') {
+        state.bomb.state = 'planted';
+        state.bomb.site = target.site;
+        state.bomb.x = p.x; state.bomb.z = p.z;
+        state.bomb.timer = BOMB_SECONDS;
+        state.stats.plants++;
+        handleEvents([{ type: 'planted', by: p, site: target.site }]);
+      } else {
+        state.bomb.state = 'defused';
+        state.stats.defuses++;
+        handleEvents([{ type: 'defused', by: p }]);
+      }
       channel = null;
       hud.setPlantBar(false);
     }
@@ -558,6 +704,7 @@ function updatePlayer(dt) {
       _dir.z += (Math.random() - 0.5) * spread * 2;
       _dir.normalize();
       const evs = fireHitscan(state, p, _dir, state.time, raycaster);
+      registerNoise(state, p.x, p.z);
       state.stats.shots += def.pellets || 1;
       handleEvents(evs);
       sound.shot(def.sound, 0);
@@ -601,7 +748,6 @@ function simulate(dt) {
     if (state.bomb.timer <= 0) {
       state.bomb.state = 'exploded';
       sound.explosion();
-      // Blast: kill everyone near the site.
       const site = state.bomb.site === 'A' ? SITE_A : SITE_B;
       const all = [state.player, ...state.bots];
       for (const c of all) {
@@ -613,14 +759,27 @@ function simulate(dt) {
           handleEvents(evs);
         }
       }
-      endRound('attack', 'The charge detonated at Site ' + state.bomb.site + '.');
+      endRound(state.attackTeam, 'The charge detonated at Site ' + state.bomb.site + '.');
       return;
     }
   }
-  // Smokes decay
+  // Smokes and fires decay; fires burn.
   for (let i = state.smokes.length - 1; i >= 0; i--) {
     state.smokes[i].ttl -= dt;
     if (state.smokes[i].ttl <= 0) state.smokes.splice(i, 1);
+  }
+  for (let i = state.fires.length - 1; i >= 0; i--) {
+    state.fires[i].ttl -= dt;
+    if (state.fires[i].ttl <= 0) state.fires.splice(i, 1);
+  }
+  if (state.fires.length) {
+    const evs = [];
+    burnFires(state, dt, evs);
+    handleEvents(evs);
+  }
+  // Old noise stops mattering.
+  for (let i = state.noise.length - 1; i >= 0; i--) {
+    if (state.time - state.noise[i].t > 6) state.noise.splice(i, 1);
   }
   updatePlayer(dt);
   const events = [];
@@ -633,7 +792,6 @@ function simulate(dt) {
 const _v = new THREE.Vector3();
 function render(dtReal) {
   const p = state.player;
-  // Camera follows the player, or the spectated teammate when dead.
   let target = p;
   if (!p.alive && state.spectateId) {
     const mate = state.bots.find((b) => b.id === state.spectateId);
@@ -670,6 +828,31 @@ function render(dtReal) {
       if (sp.material.opacity <= 0.05) sp.visible = false;
     }
   }
+  // Sparks fade fast.
+  for (const sp of sparkSprites) {
+    if (sp.visible) {
+      sp.material.opacity -= dtReal * (sp.userData.fade || 3);
+      if (sp.material.opacity <= 0.05) sp.visible = false;
+    }
+  }
+  // Flames flicker over burning zones.
+  for (const sp of fireSprites) {
+    if (sp.visible) {
+      sp.material.opacity -= dtReal * (sp.userData.fade || 1.4);
+      sp.scale.y = 3.2 + Math.sin(state.time * 13 + sp.position.x) * 0.5;
+      if (sp.material.opacity <= 0.05) sp.visible = false;
+    }
+  }
+  // Fire lights follow the burning zones.
+  for (let i = 0; i < fireLights.length; i++) {
+    const f = state.fires[i];
+    if (f) {
+      fireLights[i].position.set(f.x, 1.2, f.z);
+      fireLights[i].intensity = 22 + Math.sin(state.time * 11 + i * 2) * 6;
+    } else {
+      fireLights[i].intensity = 0;
+    }
+  }
   // Bomb prop + LED blink
   if (state.bomb.state === 'planted' || state.bomb.state === 'dropped') {
     bombMesh.visible = true;
@@ -685,32 +868,43 @@ function render(dtReal) {
 }
 
 // ---------- main loop ----------
+// Fixed-step sim (1/60 s) decoupled from rendering. The frame delta is
+// clamped to 0.25 s and the sim runs up to 15 catch-up steps per frame, so
+// the match keeps real time down to ~4 FPS; beyond that the backlog is
+// dropped (acc capped at 0.5 s) instead of spiralling. The FPS counter
+// measures UNclamped frame time — clamping it would lie about the rate.
 let last = performance.now();
+let lastFps = last;
 let acc = 0;
+let hudT = 0;
 let fpsFrames = 0, fpsT = 0;
 function loop(now) {
   requestAnimationFrame(loop);
-  const dtReal = Math.min(0.1, (now - last) / 1000);
-  last = now;
+  const dtReal = Math.min(0.25, (now - last) / 1000);
+  const dtFps = (now - lastFps) / 1000;
+  last = now; lastFps = now;
   if (!state.paused && state.phase !== PHASE.MENU) {
     acc += dtReal;
     let steps = 0;
-    while (acc >= STEP && steps < 5) {
+    while (acc >= STEP && steps < 15) {
       simulate(STEP);
       acc -= STEP;
       steps++;
     }
-    if (steps === 5) acc = 0;
+    if (acc > 0.5) acc = 0.5; // drop backlog beyond half a second
   }
   render(dtReal);
-  fpsFrames++; fpsT += dtReal;
+  fpsFrames++; fpsT += dtFps;
   if (fpsT >= 1) {
     $('fps').textContent = Math.round(fpsFrames / fpsT) + ' FPS';
     fpsFrames = 0; fpsT = 0;
-    if (state.phase === PHASE.LIVE || state.phase === PHASE.BUY) hud.updateHud(state);
   }
-  if (state.phase === PHASE.LIVE || state.phase === PHASE.BUY || state.phase === PHASE.ROUND_END || state.phase === PHASE.MATCH_END) {
+  // HUD at 10 Hz is plenty (minimap + numbers) and avoids a DOM write +
+  // canvas redraw on every rendered frame.
+  hudT += dtReal;
+  if (hudT >= 0.1 && (state.phase === PHASE.LIVE || state.phase === PHASE.BUY || state.phase === PHASE.ROUND_END || state.phase === PHASE.MATCH_END)) {
     hud.updateHud(state);
+    hudT = 0;
   }
 }
 requestAnimationFrame(loop);
@@ -735,18 +929,19 @@ function setupDemo() {
     closeBuy();
     state.phase = PHASE.LIVE;
     state.phaseT = 87;
-    // Stage a firefight: move some defenders into mid sightlines.
+    // Stage a firefight down the north lane: the player looks east along
+    // z=-19 with defenders spread in the open ahead of them.
     const p = state.player;
-    p.x = -9; p.z = -7; p.yaw = -Math.PI / 2 + 0.15; p.pitch = 0.01;
+    p.x = -16; p.z = -19; p.yaw = -Math.PI / 2 + 0.05; p.pitch = 0.01;
     giveWeapon(p.loadout, 'rifle');
     buildViewModel('rifle');
     p.loadout.armor = 50; p.loadout.helmet = true; p.loadout.money = 3250;
-    const d = state.bots.filter((b) => b.team === 'defend');
-    d[0].x = 8; d[0].z = -6; d[1].x = 12; d[1].z = 4; d[2].x = 16; d[2].z = -10;
-    d[3].x = 2; d[3].z = 14; d[4].x = 20; d[4].z = 0;
-    const a = state.bots.filter((b) => b.team === 'attack');
-    a[0].x = -12; a[0].z = -6; a[1].x = -10; a[1].z = 6;
-    state.score = { attack: 2, defend: 1 };
+    const d = state.bots.filter((b) => b.team !== state.attackTeam);
+    d[0].x = 0; d[0].z = -21; d[1].x = 6; d[1].z = -18; d[2].x = 12; d[2].z = -20;
+    d[3].x = 18; d[3].z = -17; d[4].x = 4; d[4].z = -14;
+    const a = state.bots.filter((b) => b.team === state.attackTeam);
+    a[0].x = -17; a[0].z = -22; a[1].x = -13; a[1].z = -15;
+    state.score = { salvage: 2, harbour: 1 };
     state.round = 4;
     hud.clearBanner();
   }
@@ -757,12 +952,12 @@ function setupDemo() {
     hud.renderBuy(state, onBuyClick);
   }
   if (DEMO === 'end') {
-    state.score = { attack: 5, defend: 2 };
-    state.winner = 'attack';
-    state.stats = { kills: 14, deaths: 6, damage: 1840, shots: 210, hits: 96, headshots: 11, plants: 2, defuses: 0 };
+    state.score = { salvage: 5, harbour: 2 };
+    state.winner = 'salvage';
+    state.stats = { kills: 14, deaths: 6, damage: 1840, shots: 210, hits: 96, headshots: 11, plants: 2, defuses: 0, wallbangs: 3 };
     for (const c of [state.player, ...state.bots]) { c.kills = 3 + Math.floor(Math.random() * 8); c.deaths = 2 + Math.floor(Math.random() * 6); c.damageDealt = 400 + Math.floor(Math.random() * 1200); }
     state.player.kills = 14; state.player.deaths = 6; state.player.damageDealt = 1840;
-    endMatch('attack');
+    endMatch('salvage');
   }
   if (DEMO === 'menu') {
     // Menu shot is the start screen; keep the 3D scene visible behind it.
@@ -776,4 +971,4 @@ function setupDemo() {
 setupDemo();
 
 // Expose a tiny debug handle for automated testing (no network, no cheating).
-window.__emberline = { state, version: '1.0.0', viewModel, camera };
+window.__blacktide = { state, version: '2.0.0', viewModel, camera, renderer, scene };
