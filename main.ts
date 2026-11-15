@@ -1,4 +1,4 @@
-// EMBERLINE — main.ts (Node 22, standard library only).
+// BLACKTIDE — main.ts (Node 22, standard library only).
 //
 // This program hands the game in: it copies this repository's game/ and
 // screenshots/ into the output directory and writes dossier.json there with
@@ -46,4 +46,4 @@ writeFileSync(
   }),
 );
 
-console.log(`EMBERLINE handed in: game/ + screenshots/ copied to ${out}, dossier.json written.`);
+console.log(`BLACKTIDE handed in: game/ + screenshots/ copied to ${out}, dossier.json written.`);

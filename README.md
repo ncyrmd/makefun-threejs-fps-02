@@ -1,4 +1,4 @@
-# EMBERLINE — Dusk Outpost Tactical FPS
+# BLACKTIDE — Night Harbor Tactical FPS
 
 A round-based, Counter-Strike-style tactical FPS in three.js, built for the
 make.fun **threejs-fps-02** competition. Fully original map, art, sounds and
@@ -7,35 +7,48 @@ request.
 
 ## The game
 
-You are a **Warden** attacking the Dusk Outpost with four bot teammates
-against five **Emberjack** defenders. First team to **5 rounds** wins the
-match (max 9 rounds).
+You are a **Salvager** hitting the night harbour with four bot teammates
+against five **Harbour Watch** defenders. First crew to **5 rounds** wins the
+match (max 9 rounds). At halftime the sides swap: you attack in the first
+half and defend in the second.
 
-- **Objective:** plant the charge at **Site A** or **Site B** and defend it
-  for 35 seconds — or eliminate the whole enemy team. Defenders win by
-  stopping the plant, defusing it (5 s channel), or running out the clock.
+- **Objective:** plant the charge at **Site A** (warehouse interior) or
+  **Site B** (crane dock) and defend it for 35 seconds — or eliminate the
+  whole enemy crew. Defenders win by stopping the plant, defusing it (5 s
+  channel, 2.5 s with a defuse kit), or running out the clock.
 - **Economy:** $800 start, $300 per kill, $3,250 per round win, $1,900 per
   loss (+streak bonus). Spend it in the buy menu (`B`) during the 15 s buy
-  phase.
-- **Weapons:** P9 Sidearm (free), Raptor SMG ($1,200), Mule Shotgun
-  ($1,800), VK-47 Rifle ($2,700), Longbow DMR ($4,200, scoped). Plus Kevlar
-  vest, helmet, flashbangs and smoke grenades.
-- **Gunplay:** hitscan with spread/recoil/bloom, headshot multipliers,
-  armor + helmet damage model, range falloff, tracers, muzzle flash,
-  hitmarkers, damage numbers, hit-direction indicator. Stopping to aim pays:
-  moving, jumping and spraying all widen spread.
+  phase. Bots buy by the same economy: rifles after a win, a save after a
+  loss streak.
+- **Weapons:** P9 Sidearm (free), Viper SMG ($1,100), Mule Shotgun ($1,700),
+  VK-47 Rifle ($2,700), Maul LMG ($3,400, 60-round belt), Longbow DMR
+  ($4,200, scoped). Plus Kevlar vest, helmet, a defuse kit, flashbangs,
+  smoke grenades and incendiaries.
+- **Gunplay:** hitscan with deterministic spray patterns (the rifle climbs,
+  then drifts — drag against it), headshot multipliers, armor + helmet
+  damage model, range falloff, tracers, muzzle flash, hitmarkers, damage
+  numbers, hit-direction indicator. Thin cover — crates, container walls —
+  can be shot through at half damage (wallbang, amber hitmarker); warehouse
+  steel stops rounds cold. Getting hit tags you: you move slower for a
+  moment, so the first shot wins the peek. Stopping to aim pays: moving,
+  jumping and spraying all widen spread.
 - **Movement:** acceleration-based WASD, walk (Shift, accurate), crouch
   (Ctrl), jump (Space), AABB collision with the map, ADS zoom on the DMR.
-- **Bot AI:** waypoint-graph navigation, site pushes, angle holds, reaction
+- **Bot AI:** roles (entry, AWP, lurk, support, anchor, rotator), a
+  waypoint graph, coordinated site executes (support smokes the entrance,
+  entry flashes over it, the squad pushes together), site holds, reaction
   delays, distance-based aim error, burst fire, strafing in fights, planting,
-  defusing, retreating to the bomb, and smoke/flash awareness. Fair, not
-  aimbot.
-- **HUD:** health/armor, ammo, money, round score + timer, alive counts,
-  kill feed, minimap with live positions and bomb status, dynamic crosshair,
-  plant/defuse progress bar, death cam (spectate a teammate).
-- **Presentation:** dusk desert outpost — amber sun, long shadows, procedural
-  canvas textures (cracked earth, weathered walls, crates), synthesized
-  WebAudio gunfire (no audio files), round-win/lose stings.
+  defusing, retreating to the bomb, smoke/flash/fire awareness, and rotation
+  toward gunfire they hear. Fair, not aimbot.
+- **HUD:** health/armor, ammo, money, round score + timer + round history,
+  alive counts, kill feed, minimap with live positions and bomb status,
+  dynamic crosshair, plant/defuse progress bar, death cam (spectate a
+  teammate).
+- **Presentation:** night container port — cold moonlight, amber
+  floodlights, fog, a moored ship on the water, a gantry crane over Site B,
+  neon signs, procedural canvas textures (wet asphalt, corrugated steel,
+  painted containers), synthesized WebAudio gunfire (no audio files),
+  round-win/lose stings, and the crane horn that opens the match.
 
 ## Controls
 
@@ -51,8 +64,8 @@ match (max 9 rounds).
 | Ctrl / C | Crouch |
 | Space | Jump |
 | B | Buy menu (buy phase) |
-| 4 / 5 | Flashbang / smoke |
-| E | Plant charge / pick it up (hold) |
+| 4 / 5 / 6 | Flashbang / smoke / incendiary |
+| E | Plant charge / defuse (hold) |
 | Esc | Pause |
 | M | Mute |
 
@@ -78,14 +91,14 @@ output directory and writes `dossier.json` with
 
 ## Layout
 
-```
+```text
 game/index.html        HUD, menus, import map
 game/src/main.js       bootstrap, fixed-step loop, player, round flow
-game/src/state.js      central match state
-game/src/map.js        Dusk Outpost: colliders, waypoints, LOS, scene
-game/src/bots.js       bot AI + bot meshes
-game/src/combat.js     hitscan, damage, grenades, bomb objective
-game/src/weapons.js    weapon defs + economy + buy catalogue
+game/src/state.js      central match state, halftime side swap
+game/src/map.js        Night Harbor: colliders, waypoints, LOS, scene
+game/src/weapons.js    weapon defs, spray patterns, economy, buy catalogue
+game/src/combat.js     hitscan, penetration, tagging, grenades, bomb
+game/src/bots.js       bot AI: roles, executes, economy, ears, fire sense
 game/src/audio.js      synthesized WebAudio sounds
 game/src/hud.js        HUD, minimap, buy menu, match-end table
 game/src/textures.js   procedural canvas textures
